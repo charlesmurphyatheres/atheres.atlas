@@ -1,0 +1,41 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Build output
+**/bin/
+**/obj/
+
+# IDE
+**/.vs/
+**/.idea/
+**/*.user
+**/*.suo
+**/*.userprefs
+
+# Node
+Atheres.Atlas.FrontEnd/node_modules/
+Atheres.Atlas.FrontEnd/dist/
+
+# Local secrets (never bake into images)
+**/local.settings.json
+**/.env
+**/.env.local
+**/.env.docker
+.env
+
+# Test results
+**/TestResults/
+**/coverage/
+
+# Docs & scripts (not needed in images)
+*.md
+*.txt
+deploy.sh
+deploy.ps1
+docker-compose*.yml
+docker/
+
+# Migrations runner is handled by its own Dockerfile
+Atheres.Atlas.TestBed/

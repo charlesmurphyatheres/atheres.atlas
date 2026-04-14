@@ -1,0 +1,165 @@
+import { useEffect, useState } from 'react'
+import { getSettings, saveSettings } from '../services/apiService'
+import type { UserRouteSettings } from '../types'
+
+export default function SettingsPanel() {
+  const [settings, setSettings] = useState<UserRouteSettings>({
+    userId: 'default',
+    startAddress: '',
+    startCity: '',
+    startState: '',
+    startZip: '',
+    endAddress: '',
+    endCity: '',
+    endState: '',
+    endZip: '',
+    deliveryWindowStart: '08:00:00',
+    deliveryWindowEnd: '17:00:00',
+    confirmationDeadlineHours: 3,
+  })
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    getSettings('default')
+      .then(setSettings)
+      .catch(() => { /* Use defaults if no settings exist yet */ })
+      .finally(() => setLoading(false))
+  }, [])
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setSaving(true)
+    try {
+      await saveSettings(settings)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 3000)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function update(field: keyof UserRouteSettings, value: string | number) {
+    setSettings((s) => ({ ...s, [field]: value }))
+  }
+
+  if (loading) return <div className="flex items-center justify-center h-64 text-gray-400">Loading...</div>
+
+  return (
+    <div className="max-w-2xl space-y-6">
+      <h1 className="text-2xl font-bold text-gray-900">Route Settings</h1>
+
+      <form onSubmit={handleSubmit} className="space-y-6">
+        {/* Start / depot location */}
+        <Section title="Start Location (Depot)">
+          <Field label="Street Address">
+            <input type="text" value={settings.startAddress}
+              onChange={(e) => update('startAddress', e.target.value)}
+              className={inputClass} placeholder="123 Warehouse Blvd" required />
+          </Field>
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="City">
+              <input type="text" value={settings.startCity}
+                onChange={(e) => update('startCity', e.target.value)}
+                className={inputClass} placeholder="Denver" required />
+            </Field>
+            <Field label="State">
+              <input type="text" value={settings.startState} maxLength={2}
+                onChange={(e) => update('startState', e.target.value.toUpperCase())}
+                className={inputClass} placeholder="CO" required />
+            </Field>
+            <Field label="ZIP">
+              <input type="text" value={settings.startZip}
+                onChange={(e) => update('startZip', e.target.value)}
+                className={inputClass} placeholder="80201" required />
+            </Field>
+          </div>
+        </Section>
+
+        {/* End location */}
+        <Section title="End Location (Return)">
+          <p className="text-sm text-gray-500 -mt-1 mb-3">Leave the same as start for round-trip routes.</p>
+          <Field label="Street Address">
+            <input type="text" value={settings.endAddress}
+              onChange={(e) => update('endAddress', e.target.value)}
+              className={inputClass} placeholder="123 Warehouse Blvd" required />
+          </Field>
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="City">
+              <input type="text" value={settings.endCity}
+                onChange={(e) => update('endCity', e.target.value)}
+                className={inputClass} placeholder="Denver" required />
+            </Field>
+            <Field label="State">
+              <input type="text" value={settings.endState} maxLength={2}
+                onChange={(e) => update('endState', e.target.value.toUpperCase())}
+                className={inputClass} placeholder="CO" required />
+            </Field>
+            <Field label="ZIP">
+              <input type="text" value={settings.endZip}
+                onChange={(e) => update('endZip', e.target.value)}
+                className={inputClass} placeholder="80201" required />
+            </Field>
+          </div>
+        </Section>
+
+        {/* Delivery window & confirmation */}
+        <Section title="Delivery Window & Confirmation">
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Window Start">
+              <input type="time" value={settings.deliveryWindowStart.substring(0, 5)}
+                onChange={(e) => update('deliveryWindowStart', e.target.value + ':00')}
+                className={inputClass} required />
+            </Field>
+            <Field label="Window End">
+              <input type="time" value={settings.deliveryWindowEnd.substring(0, 5)}
+                onChange={(e) => update('deliveryWindowEnd', e.target.value + ':00')}
+                className={inputClass} required />
+            </Field>
+          </div>
+          <Field label="Confirmation Deadline (hours before delivery)">
+            <input type="number" value={settings.confirmationDeadlineHours} min={1} max={24}
+              onChange={(e) => update('confirmationDeadlineHours', parseInt(e.target.value, 10))}
+              className={inputClass} required />
+            <p className="text-xs text-gray-400 mt-1">
+              If a store hasn't confirmed within this window, the delivery is rescheduled.
+            </p>
+          </Field>
+        </Section>
+
+        <div className="flex items-center gap-3">
+          <button
+            type="submit"
+            disabled={saving}
+            className="px-5 py-2 bg-brand-500 text-white rounded-lg text-sm font-medium hover:bg-brand-600 disabled:opacity-50 transition-colors"
+          >
+            {saving ? 'Saving...' : 'Save Settings'}
+          </button>
+          {saved && <span className="text-sm text-green-600 font-medium">✓ Saved successfully</span>}
+        </div>
+      </form>
+    </div>
+  )
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-4">
+      <h2 className="font-semibold text-gray-800">{title}</h2>
+      {children}
+    </div>
+  )
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
+      {children}
+    </div>
+  )
+}
+
+const inputClass =
+  'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500'

@@ -1,0 +1,300 @@
+name: atheres-atlas
+
+# =============================================================
+# Services start order:
+#   sql + azurite + servicebus-sql
+#     → servicebus
+#       → migrations (one-shot, exits 0 on success)
+#         → functions
+#           → frontend + nginx
+# =============================================================
+
+services:
+
+  # -----------------------------------------------------------
+  # Azure Storage Emulator  (required by Functions runtime)
+  # -----------------------------------------------------------
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:3.33.0
+    container_name: atlas-azurite
+    command: >
+      azurite
+        --blobHost  0.0.0.0
+        --queueHost 0.0.0.0
+        --tableHost 0.0.0.0
+        --location  /data
+        --silent
+    volumes:
+      - azurite-data:/data
+    ports:
+      - "10000:10000"   # Blob
+      - "10001:10001"   # Queue
+      - "10002:10002"   # Table
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "10000"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - atlas-net
+
+  # -----------------------------------------------------------
+  # SQL Server 2022  (application database)
+  # -----------------------------------------------------------
+  sql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: atlas-sql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD}"
+      MSSQL_PID: Developer
+    volumes:
+      - sql-data:/var/opt/mssql
+    ports:
+      - "1433:1433"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - >
+          /opt/mssql-tools18/bin/sqlcmd
+          -S localhost -U sa -P "$$MSSQL_SA_PASSWORD"
+          -Q "SELECT 1" -b -No
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    networks:
+      - atlas-net
+
+  # -----------------------------------------------------------
+  # SQL Edge  (backend store for Service Bus Emulator)
+  # -----------------------------------------------------------
+  servicebus-sql:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    container_name: atlas-servicebus-sql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD}"
+    volumes:
+      - servicebus-sql-data:/var/opt/mssql
+    networks:
+      - atlas-net
+
+  # -----------------------------------------------------------
+  # Azure Service Bus Emulator  (all 7 queues auto-created)
+  # -----------------------------------------------------------
+  servicebus:
+    image: mcr.microsoft.com/azure-messaging/servicebus-emulator:latest
+    container_name: atlas-servicebus
+    depends_on:
+      servicebus-sql:
+        condition: service_started
+    environment:
+      ACCEPT_EULA: "Y"
+      SQL_SERVER: servicebus-sql
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD}"
+    volumes:
+      - ./docker/servicebus/config.json:/ServiceBus_Emulator/ConfigFiles/Config.json:ro
+    ports:
+      - "5672:5672"
+    # Note: emulator image has no shell/nc — healthcheck disabled
+    # Functions uses service_started + its own retry logic
+    networks:
+      - atlas-net
+
+  # -----------------------------------------------------------
+  # EF Core Migrations  (one-shot — exits 0 when done)
+  # -----------------------------------------------------------
+  migrations:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.migrations
+    container_name: atlas-migrations
+    environment:
+      SqlConnectionString: >-
+        Server=sql;Database=AtheresAtlas;
+        User Id=sa;Password=${MSSQL_SA_PASSWORD};
+        TrustServerCertificate=True;Connection Timeout=60;
+    depends_on:
+      sql:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - atlas-net
+
+  # -----------------------------------------------------------
+  # Azure Functions  (all 6 agents)
+  # -----------------------------------------------------------
+  functions:
+    build:
+      context: .
+      dockerfile: Atheres.Atlas.Functions/Dockerfile
+    container_name: atlas-functions
+    depends_on:
+      sql:
+        condition: service_healthy
+      azurite:
+        condition: service_healthy
+      servicebus:
+        condition: service_started
+      migrations:
+        condition: service_completed_successfully
+    environment:
+      # Storage (Azurite)
+      AzureWebJobsStorage: >-
+        DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;
+        AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;
+        BlobEndpoint=http://azurite:10000/devstoreaccount1;
+        QueueEndpoint=http://azurite:10001/devstoreaccount1;
+        TableEndpoint=http://azurite:10002/devstoreaccount1;
+
+      # SQL
+      SqlConnectionString: >-
+        Server=sql;Database=AtheresAtlas;
+        User Id=sa;Password=${MSSQL_SA_PASSWORD};
+        TrustServerCertificate=True;Connection Timeout=60;
+
+      # Service Bus (emulator)
+      ServiceBusConnection: >-
+        Endpoint=sb://servicebus;
+        SharedAccessKeyName=RootManageSharedAccessKey;
+        SharedAccessKey=SAS_KEY_VALUE;
+        UseDevelopmentEmulator=true;
+
+      # SignalR  ⚠ Requires real Azure SignalR connection string in .env.docker
+      AzureSignalRConnectionString: "${AZURE_SIGNALR_CONNECTION}"
+
+      # Google Maps
+      GoogleMapsApiKey: "${GOOGLE_MAPS_API_KEY}"
+
+      # SendGrid
+      SendGridApiKey: "${SENDGRID_API_KEY}"
+      SendGridFromEmail: "${SENDGRID_FROM_EMAIL}"
+      SendGridFromName: "${SENDGRID_FROM_NAME:-Atheres Atlas Delivery}"
+
+      # Confirmation email links point to the public-facing nginx port
+      FunctionHostUrl: "${FUNCTION_HOST_URL:-http://localhost}"
+
+      # JWT (needed for bearer validation on protected endpoints)
+      JwtSecretKey:         "${JWT_SECRET_KEY}"
+      JwtIssuer:            "${JWT_ISSUER:-http://localhost}"
+      JwtAudience:          "${JWT_AUDIENCE:-http://localhost}"
+
+      ASPNETCORE_ENVIRONMENT: "${ASPNETCORE_ENVIRONMENT:-Development}"
+      FUNCTIONS_WORKER_RUNTIME: dotnet-isolated
+
+    ports:
+      - "7071:80"    # direct access for debugging / Postman
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost/api/query/orders | grep -qE '200|401|404'"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    networks:
+      - atlas-net
+
+  # -----------------------------------------------------------
+  # Auth Functions  (ASP.NET Core Identity — JWT issue/refresh)
+  # -----------------------------------------------------------
+  auth:
+    build:
+      context: .
+      dockerfile: Atheres.Atlas.Auth.Functions/Dockerfile
+    container_name: atlas-auth
+    depends_on:
+      sql:
+        condition: service_healthy
+      azurite:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    environment:
+      AzureWebJobsStorage: >-
+        DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;
+        AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;
+        BlobEndpoint=http://azurite:10000/devstoreaccount1;
+        QueueEndpoint=http://azurite:10001/devstoreaccount1;
+        TableEndpoint=http://azurite:10002/devstoreaccount1;
+
+      SqlConnectionString: >-
+        Server=sql;Database=AtheresAtlas;
+        User Id=sa;Password=${MSSQL_SA_PASSWORD};
+        TrustServerCertificate=True;Connection Timeout=60;
+
+      JwtSecretKey:          "${JWT_SECRET_KEY}"
+      JwtIssuer:             "${JWT_ISSUER:-http://localhost}"
+      JwtAudience:           "${JWT_AUDIENCE:-http://localhost}"
+      JwtExpiryMinutes:      "${JWT_EXPIRY_MINUTES:-15}"
+      JwtRefreshExpiryDays:  "${JWT_REFRESH_EXPIRY_DAYS:-7}"
+
+      # Optional: seed an initial Admin user on first start
+      SeedAdminEmail:    "${SEED_ADMIN_EMAIL:-}"
+      SeedAdminPassword: "${SEED_ADMIN_PASSWORD:-}"
+
+      ASPNETCORE_ENVIRONMENT: "${ASPNETCORE_ENVIRONMENT:-Development}"
+      FUNCTIONS_WORKER_RUNTIME: dotnet-isolated
+
+    ports:
+      - "7072:80"    # direct access for debugging / Postman
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost/api/auth/me | grep -qE '200|401|404'"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    networks:
+      - atlas-net
+
+  # -----------------------------------------------------------
+  # React Frontend
+  # -----------------------------------------------------------
+  frontend:
+    build:
+      context: ./Atheres.Atlas.FrontEnd
+      dockerfile: Dockerfile
+      args:
+        VITE_GOOGLE_MAPS_KEY: "${GOOGLE_MAPS_API_KEY}"
+    container_name: atlas-frontend
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - atlas-net
+
+  # -----------------------------------------------------------
+  # Nginx Reverse Proxy  (public entry point — port 80)
+  # -----------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: atlas-nginx
+    depends_on:
+      functions:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    volumes:
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "9708:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - atlas-net
+
+# =============================================================
+volumes:
+  sql-data:
+  servicebus-sql-data:
+  azurite-data:
+
+networks:
+  atlas-net:
+    driver: bridge

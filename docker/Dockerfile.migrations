@@ -1,0 +1,33 @@
+# =============================================================
+# EF Core Migration Runner
+# One-shot container: runs dotnet ef database update, then exits.
+# Build context: solution root
+# =============================================================
+
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS migrations
+WORKDIR /src
+
+# Restore only what's needed for the Data + Functions projects
+COPY Atheres.Atlas.sln                                             ./
+COPY Atheres.Atlas.Domain/Atheres.Atlas.Domain.csproj             Atheres.Atlas.Domain/
+COPY Atheres.Atlas.Data/Atheres.Atlas.Data.csproj                 Atheres.Atlas.Data/
+COPY Atheres.Atlas.Functions/Atheres.Atlas.Functions.csproj       Atheres.Atlas.Functions/
+
+RUN dotnet restore Atheres.Atlas.Data/Atheres.Atlas.Data.csproj
+
+# Install EF Core CLI tools (must match EF Core package version in the project)
+RUN dotnet tool install --global dotnet-ef --version 8.0.11
+ENV PATH="${PATH}:/root/.dotnet/tools"
+
+# Copy all source
+COPY Atheres.Atlas.Domain/    Atheres.Atlas.Domain/
+COPY Atheres.Atlas.Data/      Atheres.Atlas.Data/
+COPY Atheres.Atlas.Functions/ Atheres.Atlas.Functions/
+
+WORKDIR /src/Atheres.Atlas.Data
+
+# SqlConnectionString is injected at runtime via docker-compose environment.
+# Run database update for both DbContexts sequentially.
+ENTRYPOINT ["/bin/bash", "-c", \
+  "dotnet ef database update --context AtlasDbContext         --startup-project ../Atheres.Atlas.Functions --verbose && \
+   dotnet ef database update --context AtlasIdentityDbContext --startup-project ../Atheres.Atlas.Functions --verbose"]

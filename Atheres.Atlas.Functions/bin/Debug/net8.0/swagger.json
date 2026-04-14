@@ -1,0 +1,550 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Atheres Atlas API",
+    "description": "Delivery management system — order ingestion, batch scheduling, route optimization, and delivery confirmation.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    { "url": "http://localhost:7071/api", "description": "Local Functions (main)" },
+    { "url": "http://localhost:7072/api", "description": "Local Functions (auth)" }
+  ],
+  "tags": [
+    { "name": "Orders", "description": "Order ingestion and management" },
+    { "name": "Batches", "description": "Order batching and pickup scheduling" },
+    { "name": "Routes", "description": "Delivery routes and optimization" },
+    { "name": "Stores", "description": "Store (delivery destination) reference data" },
+    { "name": "Communications", "description": "Email confirmation tracking" },
+    { "name": "Confirmations", "description": "Store delivery confirmation/rejection" },
+    { "name": "Settings", "description": "Route and delivery window settings" },
+    { "name": "Trucks", "description": "Vehicle management" },
+    { "name": "Auth", "description": "Authentication and user management" },
+    { "name": "Companies", "description": "Company/tenant management" },
+    { "name": "Hubs", "description": "Hub (company home base) management" },
+    { "name": "Warehouses", "description": "Warehouse (client) management" },
+    { "name": "Users", "description": "User CRUD and role management" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      },
+      "FunctionKey": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "code"
+      }
+    },
+    "schemas": {
+      "OrderInput": {
+        "type": "object",
+        "required": ["warehouseLicenseNumber", "storeLicenseNumber", "orderDate"],
+        "properties": {
+          "warehouseLicenseNumber": { "type": "string", "example": "CG00000019" },
+          "storeLicenseNumber": { "type": "string", "example": "284000351" },
+          "orderDate": { "type": "string", "format": "date-time" },
+          "notes": { "type": "string", "nullable": true }
+        }
+      },
+      "Order": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "companyId": { "type": "string", "format": "uuid" },
+          "storeName": { "type": "string" },
+          "address": { "type": "string" },
+          "city": { "type": "string" },
+          "state": { "type": "string" },
+          "zip": { "type": "string" },
+          "county": { "type": "string" },
+          "district": { "type": "string" },
+          "zone": { "type": "string" },
+          "orderDate": { "type": "string", "format": "date-time" },
+          "email": { "type": "string" },
+          "phone": { "type": "string", "nullable": true },
+          "status": { "type": "string", "enum": ["Ordered", "Scheduled", "RouteOptimized", "ConfirmationPending", "Confirmed", "Rejected", "OutForDelivery", "Delivered", "Archived", "Cancelled"] },
+          "expectedDeliveryDate": { "type": "string", "format": "date-time", "nullable": true },
+          "confirmationDeadline": { "type": "string", "format": "date-time", "nullable": true },
+          "confirmedAt": { "type": "string", "format": "date-time", "nullable": true },
+          "routeId": { "type": "string", "format": "uuid", "nullable": true },
+          "batchId": { "type": "string", "format": "uuid", "nullable": true },
+          "storeId": { "type": "string", "format": "uuid", "nullable": true },
+          "warehouseId": { "type": "string", "format": "uuid", "nullable": true },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ReadyToPickup": {
+        "type": "object",
+        "required": ["warehouseLicenseNumber", "pickupDateTime"],
+        "properties": {
+          "warehouseLicenseNumber": { "type": "string", "example": "CG00000019" },
+          "pickupDateTime": { "type": "string", "format": "date-time" },
+          "orderIds": { "type": "array", "items": { "type": "string", "format": "uuid" }, "nullable": true }
+        }
+      },
+      "Batch": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "companyId": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "status": { "type": "string", "enum": ["Open", "Scheduled", "RouteOptimized", "InTransit", "Completed", "Cancelled"] },
+          "hubName": { "type": "string" },
+          "warehouseName": { "type": "string" },
+          "truckName": { "type": "string", "nullable": true },
+          "orderCount": { "type": "integer" },
+          "pickupDate": { "type": "string", "format": "date-time", "nullable": true },
+          "routeId": { "type": "string", "format": "uuid", "nullable": true },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Route": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "deliveryDate": { "type": "string", "format": "date" },
+          "startAddress": { "type": "string" },
+          "endAddress": { "type": "string" },
+          "totalStops": { "type": "integer" },
+          "totalDistanceMiles": { "type": "number" },
+          "totalDuration": { "type": "string", "example": "3:45" },
+          "isOptimized": { "type": "boolean" },
+          "overviewPolyline": { "type": "string", "nullable": true },
+          "stops": { "type": "array", "items": { "$ref": "#/components/schemas/RouteStop" } }
+        }
+      },
+      "RouteStop": {
+        "type": "object",
+        "properties": {
+          "orderId": { "type": "string", "format": "uuid" },
+          "sequence": { "type": "integer" },
+          "storeName": { "type": "string" },
+          "address": { "type": "string" },
+          "latitude": { "type": "number" },
+          "longitude": { "type": "number" },
+          "estimatedArrival": { "type": "string", "format": "date-time", "nullable": true },
+          "orderStatus": { "type": "string" },
+          "confirmationStatus": { "type": "string" },
+          "legDistanceMiles": { "type": "number" },
+          "legDurationMinutes": { "type": "number" }
+        }
+      },
+      "PagedResult": {
+        "type": "object",
+        "properties": {
+          "items": { "type": "array", "items": {} },
+          "total": { "type": "integer" },
+          "page": { "type": "integer" },
+          "pageSize": { "type": "integer" }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": ["email", "password"],
+        "properties": {
+          "email": { "type": "string", "format": "email" },
+          "password": { "type": "string" }
+        }
+      },
+      "TokenResponse": {
+        "type": "object",
+        "properties": {
+          "accessToken": { "type": "string" },
+          "refreshToken": { "type": "string" },
+          "expiresAt": { "type": "string", "format": "date-time" },
+          "userId": { "type": "string" },
+          "email": { "type": "string" },
+          "fullName": { "type": "string" },
+          "roles": { "type": "array", "items": { "type": "string" } },
+          "companyId": { "type": "string", "format": "uuid", "nullable": true },
+          "companyName": { "type": "string", "nullable": true }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/orders": {
+      "post": {
+        "tags": ["Orders"],
+        "summary": "Ingest orders",
+        "description": "Public endpoint for warehouse systems to submit orders. Orders are matched to warehouses and stores by license number.",
+        "security": [{ "FunctionKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/OrderInput" } } } }
+        },
+        "responses": {
+          "202": { "description": "Orders accepted", "content": { "application/json": { "schema": { "type": "object", "properties": { "accepted": { "type": "integer" }, "orderIds": { "type": "array", "items": { "type": "string" } }, "errors": { "type": "array", "items": { "type": "string" } } } } } } },
+          "400": { "description": "Invalid input" }
+        }
+      },
+      "get": {
+        "tags": ["Orders"],
+        "summary": "List orders",
+        "description": "Paginated list of orders, filterable by status and date.",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "type": "string" } },
+          { "name": "date", "in": "query", "schema": { "type": "string", "format": "date" } },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
+          { "name": "pageSize", "in": "query", "schema": { "type": "integer", "default": 25, "maximum": 200 } }
+        ],
+        "responses": {
+          "200": { "description": "Paged order list", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PagedResult" } } } }
+        }
+      }
+    },
+    "/orders/{id}": {
+      "get": {
+        "tags": ["Orders"],
+        "summary": "Get order by ID",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": { "200": { "description": "Order details", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Order" } } } }, "404": { "description": "Not found" } }
+      }
+    },
+    "/orders/{id}/status": {
+      "patch": {
+        "tags": ["Orders"],
+        "summary": "Set order status",
+        "description": "Manually update an order's status. Admin/Logistics only.",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "status": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "Status updated" } }
+      }
+    },
+    "/orders/{id}/confirm": {
+      "post": {
+        "tags": ["Orders"],
+        "summary": "Manually confirm order",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": { "200": { "description": "Order confirmed" } }
+      }
+    },
+    "/orders/{id}/archive": {
+      "post": {
+        "tags": ["Orders"],
+        "summary": "Archive a delivered order",
+        "description": "Archives communications for a completed delivery.",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": { "200": { "description": "Order archived" } }
+      }
+    },
+    "/orders/communications": {
+      "get": {
+        "tags": ["Communications"],
+        "summary": "List order communications",
+        "description": "Email tracking dashboard — shows confirmation email status per order.",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "type": "string" } },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
+          { "name": "pageSize", "in": "query", "schema": { "type": "integer", "default": 25 } }
+        ],
+        "responses": { "200": { "description": "Paged communication records" } }
+      }
+    },
+    "/ready-to-pickup": {
+      "post": {
+        "tags": ["Batches"],
+        "summary": "Ready to pickup",
+        "description": "Called by warehouse systems when orders are ready. Creates a batch, assigns all Ordered orders for this warehouse, and triggers route optimization.",
+        "security": [{ "FunctionKey": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReadyToPickup" } } } },
+        "responses": {
+          "200": { "description": "Batch created and optimization triggered", "content": { "application/json": { "schema": { "type": "object", "properties": { "batchId": { "type": "string", "format": "uuid" }, "warehouseName": { "type": "string" }, "orderCount": { "type": "integer" }, "ordersQueuedForRouting": { "type": "integer" }, "routeRequestId": { "type": "string", "format": "uuid" } } } } } }
+        }
+      }
+    },
+    "/batches": {
+      "get": {
+        "tags": ["Batches"],
+        "summary": "List batches",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "status", "in": "query", "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Array of batches", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Batch" } } } } } }
+      },
+      "post": {
+        "tags": ["Batches"],
+        "summary": "Create batch",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name", "hubId", "warehouseId"], "properties": { "name": { "type": "string" }, "hubId": { "type": "string", "format": "uuid" }, "warehouseId": { "type": "string", "format": "uuid" }, "truckId": { "type": "string", "format": "uuid", "nullable": true } } } } } },
+        "responses": { "201": { "description": "Batch created" } }
+      }
+    },
+    "/batches/{id}": {
+      "get": {
+        "tags": ["Batches"],
+        "summary": "Get batch with orders",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": { "200": { "description": "Batch detail with orders" } }
+      }
+    },
+    "/batches/{id}/orders": {
+      "post": {
+        "tags": ["Batches"],
+        "summary": "Add orders to batch",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "orderIds": { "type": "array", "items": { "type": "string", "format": "uuid" } } } } } } },
+        "responses": { "200": { "description": "Orders added" } }
+      }
+    },
+    "/batches/{id}/orders/{orderId}": {
+      "delete": {
+        "tags": ["Batches"],
+        "summary": "Remove order from batch",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "orderId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": { "200": { "description": "Order removed" } }
+      }
+    },
+    "/batches/{id}/schedule": {
+      "post": {
+        "tags": ["Batches"],
+        "summary": "Schedule batch pickup",
+        "description": "Sets pickup date and triggers route optimization for all orders in the batch.",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "pickupDate": { "type": "string", "format": "date-time" } } } } } },
+        "responses": { "200": { "description": "Batch scheduled, optimization queued" } }
+      }
+    },
+    "/routes": {
+      "get": {
+        "tags": ["Routes"],
+        "summary": "List routes",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "date", "in": "query", "schema": { "type": "string", "format": "date" } }],
+        "responses": { "200": { "description": "Array of routes with stops", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Route" } } } } } }
+      }
+    },
+    "/routes/{id}": {
+      "get": {
+        "tags": ["Routes"],
+        "summary": "Get route by ID",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": { "200": { "description": "Route with stops" } }
+      }
+    },
+    "/routes/optimize": {
+      "post": {
+        "tags": ["Routes"],
+        "summary": "Trigger route optimization",
+        "description": "Manually trigger Google Maps route optimization. Admin/Logistics only.",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["deliveryDate", "hubId"], "properties": { "deliveryDate": { "type": "string", "format": "date" }, "hubId": { "type": "string", "format": "uuid" }, "warehouseId": { "type": "string", "format": "uuid", "nullable": true }, "orderIds": { "type": "array", "items": { "type": "string", "format": "uuid" } } } } } } },
+        "responses": { "200": { "description": "Optimization queued" } }
+      }
+    },
+    "/routes/{routeId}/stops/{orderId}": {
+      "patch": {
+        "tags": ["Routes"],
+        "summary": "Reorder route stop",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "routeId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "orderId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "sequence": { "type": "integer" } } } } } },
+        "responses": { "200": { "description": "Stop reordered" } }
+      }
+    },
+    "/stores": {
+      "get": {
+        "tags": ["Stores"],
+        "summary": "List stores",
+        "security": [{ "BearerAuth": [] }],
+        "responses": { "200": { "description": "Array of active stores", "content": { "application/json": { "schema": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "name": { "type": "string" }, "licenseNumber": { "type": "string" }, "customer": { "type": "string" }, "city": { "type": "string" } } } } } } } }
+      }
+    },
+    "/trucks": {
+      "get": {
+        "tags": ["Trucks"],
+        "summary": "List trucks",
+        "security": [{ "BearerAuth": [] }],
+        "responses": { "200": { "description": "Array of active trucks" } }
+      }
+    },
+    "/settings/{userId}": {
+      "get": {
+        "tags": ["Settings"],
+        "summary": "Get route settings",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "userId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Route settings" } }
+      },
+      "put": {
+        "tags": ["Settings"],
+        "summary": "Save route settings",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "userId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "startAddress": { "type": "string" }, "startCity": { "type": "string" }, "startState": { "type": "string" }, "startZip": { "type": "string" }, "endAddress": { "type": "string" }, "endCity": { "type": "string" }, "endState": { "type": "string" }, "endZip": { "type": "string" }, "deliveryWindowStart": { "type": "string", "example": "08:00:00" }, "deliveryWindowEnd": { "type": "string", "example": "17:00:00" }, "confirmationDeadlineHours": { "type": "integer" } } } } } },
+        "responses": { "200": { "description": "Settings saved" } }
+      }
+    },
+    "/confirmations/confirm": {
+      "get": {
+        "tags": ["Confirmations"],
+        "summary": "Confirm delivery (email link)",
+        "description": "Store clicks this link in the confirmation email to accept delivery.",
+        "parameters": [{ "name": "token", "in": "query", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "HTML confirmation page" }, "404": { "description": "Token not found" }, "410": { "description": "Token expired" } }
+      }
+    },
+    "/confirmations/reject": {
+      "get": {
+        "tags": ["Confirmations"],
+        "summary": "Reject delivery (email link)",
+        "description": "Store clicks this link to decline delivery.",
+        "parameters": [{ "name": "token", "in": "query", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "HTML rejection page" } }
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Login",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" } } } },
+        "responses": { "200": { "description": "JWT tokens", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TokenResponse" } } } }, "401": { "description": "Invalid credentials" } }
+      }
+    },
+    "/auth/register": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Register user",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["email", "password"], "properties": { "email": { "type": "string", "format": "email" }, "password": { "type": "string" }, "firstName": { "type": "string" }, "lastName": { "type": "string" }, "companyId": { "type": "string", "format": "uuid" }, "role": { "type": "string", "enum": ["Logistics", "Driver"] } } } } } },
+        "responses": { "200": { "description": "User created" } }
+      }
+    },
+    "/auth/refresh": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Refresh token",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "refreshToken": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "New tokens" } }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Logout",
+        "security": [{ "BearerAuth": [] }],
+        "responses": { "200": { "description": "Logged out" } }
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "Get current user",
+        "security": [{ "BearerAuth": [] }],
+        "responses": { "200": { "description": "Current user profile" } }
+      }
+    },
+    "/companies": {
+      "get": {
+        "tags": ["Companies"],
+        "summary": "List companies (SuperAdmin)",
+        "security": [{ "BearerAuth": [] }],
+        "responses": { "200": { "description": "Array of companies" } }
+      },
+      "post": {
+        "tags": ["Companies"],
+        "summary": "Create company (SuperAdmin)",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" }, "slug": { "type": "string" }, "contactEmail": { "type": "string" }, "contactPhone": { "type": "string" }, "timezone": { "type": "string", "default": "America/Chicago" }, "adminEmail": { "type": "string" }, "adminPassword": { "type": "string" } } } } } },
+        "responses": { "201": { "description": "Company created" } }
+      }
+    },
+    "/companies/{id}": {
+      "get": {
+        "tags": ["Companies"],
+        "summary": "Get company",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": { "200": { "description": "Company details with trucks" } }
+      },
+      "put": {
+        "tags": ["Companies"],
+        "summary": "Update company",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" }, "contactEmail": { "type": "string" }, "contactPhone": { "type": "string" }, "timezone": { "type": "string" }, "isActive": { "type": "boolean" } } } } } },
+        "responses": { "200": { "description": "Company updated" } }
+      },
+      "delete": {
+        "tags": ["Companies"],
+        "summary": "Deactivate company (SuperAdmin)",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": { "200": { "description": "Company deactivated" } }
+      }
+    },
+    "/companies/{id}/trucks": {
+      "post": {
+        "tags": ["Companies"],
+        "summary": "Add truck to company",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" } } } } } },
+        "responses": { "201": { "description": "Truck added" } }
+      }
+    },
+    "/hubs": {
+      "get": { "tags": ["Hubs"], "summary": "List hubs", "security": [{ "BearerAuth": [] }], "responses": { "200": { "description": "Array of hubs" } } },
+      "post": {
+        "tags": ["Hubs"],
+        "summary": "Create hub",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name", "address"], "properties": { "companyId": { "type": "string", "format": "uuid" }, "name": { "type": "string" }, "address": { "type": "string" }, "city": { "type": "string" }, "state": { "type": "string" }, "zip": { "type": "string" } } } } } },
+        "responses": { "201": { "description": "Hub created" } }
+      }
+    },
+    "/hubs/{id}": {
+      "put": { "tags": ["Hubs"], "summary": "Update hub", "security": [{ "BearerAuth": [] }], "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" }, "address": { "type": "string" }, "city": { "type": "string" }, "state": { "type": "string" }, "zip": { "type": "string" }, "isActive": { "type": "boolean" } } } } } }, "responses": { "200": { "description": "Hub updated" } } },
+      "delete": { "tags": ["Hubs"], "summary": "Deactivate hub", "security": [{ "BearerAuth": [] }], "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }], "responses": { "200": { "description": "Hub deactivated" } } }
+    },
+    "/warehouses": {
+      "get": { "tags": ["Warehouses"], "summary": "List warehouses", "security": [{ "BearerAuth": [] }], "responses": { "200": { "description": "Array of warehouses with pickup schedule" } } },
+      "post": {
+        "tags": ["Warehouses"],
+        "summary": "Create warehouse",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["businessName", "address"], "properties": { "companyId": { "type": "string", "format": "uuid" }, "businessName": { "type": "string" }, "alternateName": { "type": "string" }, "address": { "type": "string" }, "city": { "type": "string" }, "state": { "type": "string" }, "zip": { "type": "string" }, "licenseNumber": { "type": "string" }, "legacyLicenseNumber": { "type": "string" } } } } } },
+        "responses": { "201": { "description": "Warehouse created" } }
+      }
+    },
+    "/warehouses/{id}": {
+      "put": { "tags": ["Warehouses"], "summary": "Update warehouse (including pickup schedule)", "security": [{ "BearerAuth": [] }], "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "businessName": { "type": "string" }, "alternateName": { "type": "string" }, "address": { "type": "string" }, "city": { "type": "string" }, "state": { "type": "string" }, "zip": { "type": "string" }, "licenseNumber": { "type": "string" }, "legacyLicenseNumber": { "type": "string" }, "isActive": { "type": "boolean" }, "mondayPickupTime": { "type": "string", "example": "08:00" }, "tuesdayPickupTime": { "type": "string" }, "wednesdayPickupTime": { "type": "string" }, "thursdayPickupTime": { "type": "string" }, "fridayPickupTime": { "type": "string" }, "saturdayPickupTime": { "type": "string" }, "sundayPickupTime": { "type": "string" } } } } } }, "responses": { "200": { "description": "Warehouse updated" } } },
+      "delete": { "tags": ["Warehouses"], "summary": "Deactivate warehouse", "security": [{ "BearerAuth": [] }], "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }], "responses": { "200": { "description": "Warehouse deactivated" } } }
+    },
+    "/users": {
+      "get": { "tags": ["Users"], "summary": "List users (Admin)", "security": [{ "BearerAuth": [] }], "responses": { "200": { "description": "Array of users" } } }
+    },
+    "/users/{id}": {
+      "get": { "tags": ["Users"], "summary": "Get user", "security": [{ "BearerAuth": [] }], "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "User details" } } },
+      "delete": { "tags": ["Users"], "summary": "Deactivate user", "security": [{ "BearerAuth": [] }], "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "User deactivated" } } }
+    },
+    "/users/{id}/roles": {
+      "put": {
+        "tags": ["Users"],
+        "summary": "Set user role",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "role": { "type": "string", "enum": ["SuperAdmin", "Admin", "Logistics", "Driver"] } } } } } },
+        "responses": { "200": { "description": "Role updated" } }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sort find:*)",
+      "Bash(grep -E \"\\\\.\\(cs\\)$\")",
+      "Bash(docker compose:*)",
+      "Bash(docker run --rm --network atheres-atlas_atlas-net -e SqlConnectionString=\"Server=sql;Database=AtheresAtlas;User Id=sa;Password=YourPassword123!;TrustServerCertificate=True;\" --entrypoint bash atheres-atlas_migrations -c \":*)",
+      "Bash(docker run --rm --entrypoint bash atheres-atlas_migrations -c \":*)",
+      "Bash(npm install:*)",
+      "Bash(ls \"c:/development/Atheres.Atlas/Atheres.Atlas.Functions/bin/output/\"*.json)",
+      "Bash(pwsh -File import-data.ps1)"
+    ]
+  }
+}
