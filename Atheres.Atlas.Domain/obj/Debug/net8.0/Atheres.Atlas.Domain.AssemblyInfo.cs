@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Atheres.Atlas.Domain")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+47038c4a2fa8a0616f7023c1fafbf00542612782")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+82ab0942a9f2d9b07f6344a3dd7f858c5f4b98d3")]
 [assembly: System.Reflection.AssemblyProductAttribute("Atheres.Atlas.Domain")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Atheres.Atlas.Domain")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

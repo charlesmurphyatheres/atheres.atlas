@@ -15,6 +15,26 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# ---- Deployment timer ---------------------------------------
+$deployStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+function Format-Duration {
+    param([System.Diagnostics.Stopwatch]$sw)
+    $ts = $sw.Elapsed
+    if ($ts.TotalHours -ge 1) { return ("{0:D}h {1:D2}m {2:D2}s" -f [int]$ts.TotalHours, $ts.Minutes, $ts.Seconds) }
+    if ($ts.TotalMinutes -ge 1) { return ("{0:D}m {1:D2}s" -f $ts.Minutes, $ts.Seconds) }
+    return ("{0:D}.{1:D3}s" -f $ts.Seconds, $ts.Milliseconds)
+}
+
+trap {
+    if ($deployStopwatch.IsRunning) {
+        $deployStopwatch.Stop()
+        Write-Host "`n  Script failed after " -NoNewline -ForegroundColor Red
+        Write-Host (Format-Duration $deployStopwatch) -ForegroundColor Cyan
+    }
+    continue
+}
+
 # =============================================================
 # 1. CONFIGURATION — fill in before running
 # =============================================================
@@ -673,9 +693,12 @@ if (Test-Path $seedScript) {
 # 14. SUMMARY
 # =============================================================
 
+$deployStopwatch.Stop()
+
 Write-Host "`n" -NoNewline
 Write-Host "=============================================================" -ForegroundColor Green
-Write-Host "  DEPLOYMENT COMPLETE" -ForegroundColor Green
+Write-Host "  DEPLOYMENT COMPLETE in " -NoNewline -ForegroundColor Green
+Write-Host (Format-Duration $deployStopwatch) -ForegroundColor Cyan
 Write-Host "=============================================================" -ForegroundColor Green
 
 Write-Host "`nResource Group:      $ResourceGroup"
@@ -727,5 +750,21 @@ Write-Host "
 
   Users:
     SuperAdmin  charles.murphy@atheres.com  (password set during deploy)
+    SuperAdmin  ken@atheres.com / Phone@3313059708
     Admin       steven@gmail.com / Secure@1234567890  (Secure Transport)
 " -ForegroundColor White
+
+# ---- Open application and demo in browser ----------------------
+$mainAppUrl = $PublicUrl
+$demoAppUrl = $DemoOrigin
+
+# If custom domain hasn't finished validating yet, use the Front Door endpoint
+try {
+    Invoke-WebRequest -Uri $mainAppUrl -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop | Out-Null
+} catch {
+    $mainAppUrl = "https://$FrontDoorHostname"
+}
+
+Write-Host "`nOpening applications in browser..." -ForegroundColor Cyan
+Start-Process $mainAppUrl
+Start-Process $demoAppUrl

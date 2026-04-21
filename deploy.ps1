@@ -22,6 +22,27 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# ---- Deployment timer ---------------------------------------
+$deployStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+function Format-Duration {
+    param([System.Diagnostics.Stopwatch]$sw)
+    $ts = $sw.Elapsed
+    if ($ts.TotalHours -ge 1) { return ("{0:D}h {1:D2}m {2:D2}s" -f [int]$ts.TotalHours, $ts.Minutes, $ts.Seconds) }
+    if ($ts.TotalMinutes -ge 1) { return ("{0:D}m {1:D2}s" -f $ts.Minutes, $ts.Seconds) }
+    return ("{0:D}.{1:D3}s" -f $ts.Seconds, $ts.Milliseconds)
+}
+
+# Print duration even on error exit
+trap {
+    if ($deployStopwatch.IsRunning) {
+        $deployStopwatch.Stop()
+        Write-Host "`n  Script failed after " -NoNewline -ForegroundColor Red
+        Write-Host (Format-Duration $deployStopwatch) -ForegroundColor Cyan
+    }
+    continue
+}
+
 # ---- Helpers ------------------------------------------------
 function Write-Header  { param($msg) Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 function Write-Info    { param($msg) Write-Host "[INFO]  $msg"  -ForegroundColor Cyan }
@@ -40,6 +61,8 @@ if ($Down) {
     Write-Header "Stopping Atheres Atlas"
     docker compose down
     Write-Ok "All containers stopped."
+    $deployStopwatch.Stop()
+    Write-Host "  Duration: " -NoNewline; Write-Host (Format-Duration $deployStopwatch) -ForegroundColor Cyan
     exit 0
 }
 
@@ -51,6 +74,8 @@ if ($Clean) {
     if ($confirm -notmatch '^[Yy]$') { Write-Info "Aborted."; exit 0 }
     docker compose down --volumes --remove-orphans
     Write-Ok "Cleanup complete."
+    $deployStopwatch.Stop()
+    Write-Host "  Duration: " -NoNewline; Write-Host (Format-Duration $deployStopwatch) -ForegroundColor Cyan
     exit 0
 }
 
@@ -299,6 +324,11 @@ Write-Host "    docker compose ps                   -> container status"
 Write-Host "    docker compose logs -f              -> tail all logs"
 Write-Host "    .\deploy.ps1 -Down                  -> stop everything"
 Write-Host "    .\deploy.ps1 -Clean                 -> stop + wipe volumes"
+Write-Host ""
+
+$deployStopwatch.Stop()
+Write-Host "  Deployment completed in " -NoNewline
+Write-Host (Format-Duration $deployStopwatch) -ForegroundColor Cyan
 Write-Host ""
 
 $credFile = Join-Path $PSScriptRoot "CREDENTIALS.txt"

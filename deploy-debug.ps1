@@ -31,6 +31,26 @@ $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $pidFile = Join-Path $root ".debug-pids"
 
+# ---- Deployment timer ---------------------------------------
+$deployStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+function Format-Duration {
+    param([System.Diagnostics.Stopwatch]$sw)
+    $ts = $sw.Elapsed
+    if ($ts.TotalHours -ge 1) { return ("{0:D}h {1:D2}m {2:D2}s" -f [int]$ts.TotalHours, $ts.Minutes, $ts.Seconds) }
+    if ($ts.TotalMinutes -ge 1) { return ("{0:D}m {1:D2}s" -f $ts.Minutes, $ts.Seconds) }
+    return ("{0:D}.{1:D3}s" -f $ts.Seconds, $ts.Milliseconds)
+}
+
+trap {
+    if ($deployStopwatch.IsRunning) {
+        $deployStopwatch.Stop()
+        Write-Host "`n  Script failed after " -NoNewline -ForegroundColor Red
+        Write-Host (Format-Duration $deployStopwatch) -ForegroundColor Cyan
+    }
+    continue
+}
+
 # ---- Helpers ------------------------------------------------
 function Write-Header  { param($msg) Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 function Write-Info    { param($msg) Write-Host "[INFO]  $msg"  -ForegroundColor Cyan }
@@ -81,12 +101,17 @@ if ($Stop) {
         Remove-Item $pidFile -Force
     }
 
+    # Also kill any stray asrs-emulator / func / node processes
+    Get-Process -Name "asrs-emulator", "func" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
     # Stop Docker infrastructure
     Push-Location $root
     docker compose stop sql azurite servicebus-sql servicebus 2>$null
     Pop-Location
     Write-Ok "All debug services stopped."
-    Write-Info "Run '.\deploy-debug.ps1 -Stop' with -Clean flag on deploy.ps1 to remove Docker volumes."
+    Write-Info "To wipe Docker volumes: .\deploy.ps1 -Clean"
+    $deployStopwatch.Stop()
+    Write-Host "  Duration: " -NoNewline; Write-Host (Format-Duration $deployStopwatch) -ForegroundColor Cyan
     exit 0
 }
 
@@ -171,6 +196,43 @@ if (-not $ready) {
 }
 Write-Ok "SQL Server is ready."
 
+# ---- Verify SA password matches the .env ---------------------
+# If the SQL volume was created with a different password, SA login will fail.
+$saPassword = [System.Environment]::GetEnvironmentVariable("MSSQL_SA_PASSWORD")
+if ($saPassword) {
+    $loginTest = docker compose exec -T sql /opt/mssql-tools18/bin/sqlcmd `
+        -S localhost -U sa -P $saPassword -Q "SELECT 1" -b -No 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "SA login failed — the SQL volume has an older password baked in."
+        Write-Warn "The SA password is set when the SQL container first initializes and persists in the volume."
+        Write-Warn "Changing MSSQL_SA_PASSWORD in .env does NOT update the existing volume."
+        Write-Host ""
+        $confirm = Read-Host "  Wipe the SQL volume and restart with the current password? [y/N]"
+        if ($confirm -match '^[Yy]$') {
+            Push-Location $root
+            docker compose stop sql | Out-Null
+            docker compose rm -f sql | Out-Null
+            docker volume rm atheres-atlas_sql-data | Out-Null
+            docker compose up -d sql | Out-Null
+            Pop-Location
+            Write-Info "Waiting for SQL Server to reinitialize..."
+            $retries = 30; $ready = $false
+            while ($retries -gt 0 -and -not $ready) {
+                try {
+                    $tcp = New-Object System.Net.Sockets.TcpClient
+                    $tcp.Connect("localhost", 1433); $tcp.Close(); $ready = $true
+                } catch { }
+                if (-not $ready) { Start-Sleep 3; Write-Host "." -NoNewline; $retries-- }
+            }
+            Write-Host ""
+            Write-Ok "SQL Server recreated with new password."
+        } else {
+            Write-Err "Cannot continue with mismatched password."
+            exit 1
+        }
+    }
+}
+
 # Wait for Service Bus emulator
 Write-Info "Waiting for Service Bus emulator on localhost:5672..."
 $retries = 30
@@ -227,6 +289,9 @@ if ($InfraOnly) {
     Write-Host "  Service Bus      " -NoNewline; Write-Host "localhost:5672" -ForegroundColor Green
     Write-Host "  SignalR Emulator " -NoNewline; Write-Host "localhost:8888 (start separately or use full deploy)" -ForegroundColor Green
     Write-Host ""
+    $deployStopwatch.Stop()
+    Write-Host "  Duration: " -NoNewline; Write-Host (Format-Duration $deployStopwatch) -ForegroundColor Cyan
+    Write-Host ""
     exit 0
 }
 
@@ -236,6 +301,17 @@ if (-not $SkipMigrations) {
 
     $dataDir = Join-Path $root "Atheres.Atlas.Data"
     $functionsProj = Join-Path $root "Atheres.Atlas.Functions"
+
+    # EF design-time needs SqlConnectionString + JwtSecretKey in the environment
+    # (Program.cs reads them via Environment.GetEnvironmentVariable)
+    $saPassword = [System.Environment]::GetEnvironmentVariable("MSSQL_SA_PASSWORD")
+    if (-not $saPassword) { $saPassword = "Richard!18641949!Strauss" }
+    $env:SqlConnectionString = "Server=localhost;Database=AtheresAtlas;User Id=sa;Password=$saPassword;TrustServerCertificate=True;"
+    $env:JwtSecretKey = [System.Environment]::GetEnvironmentVariable("JWT_SECRET_KEY")
+    if (-not $env:JwtSecretKey) { $env:JwtSecretKey = "AtlasLocal!Dev#2026`$SecureKey@9xQ7mZ" }
+    $env:JwtIssuer = "http://localhost"
+    $env:JwtAudience = "http://localhost"
+    $env:ServiceBusConnection = "Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
 
     Write-Info "Migrating AtlasDbContext..."
     Push-Location $dataDir
@@ -251,11 +327,13 @@ if (-not $SkipMigrations) {
     }
     Write-Ok "AtlasDbContext migrated."
 
+    # AtlasIdentityDbContext is registered in the Auth Functions project
+    $authProjForMigration = Join-Path $root "Atheres.Atlas.Auth.Functions"
     Write-Info "Migrating AtlasIdentityDbContext..."
-    dotnet ef database update --context AtlasIdentityDbContext --startup-project $functionsProj --no-build 2>$null
+    dotnet ef database update --context AtlasIdentityDbContext --startup-project $authProjForMigration --no-build 2>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Warn "Migration with --no-build failed, retrying with build..."
-        dotnet ef database update --context AtlasIdentityDbContext --startup-project $functionsProj
+        dotnet ef database update --context AtlasIdentityDbContext --startup-project $authProjForMigration
         if ($LASTEXITCODE -ne 0) {
             Write-Err "AtlasIdentityDbContext migration failed."
             Pop-Location
@@ -268,24 +346,12 @@ if (-not $SkipMigrations) {
     Write-Info "Skipping migrations (-SkipMigrations)"
 }
 
-# ---- Import reference data (stores + warehouses) ---------------
+# ---- Import reference data (direct SQL — no API dependency) -----
 if (-not $SkipMigrations) {
     $importScript = Join-Path $root "import-data.ps1"
     if (Test-Path $importScript) {
         Write-Header "Importing reference data"
         & $importScript
-    }
-
-    $seedScript = Join-Path $root "seed-secure-transport.ps1"
-    if (Test-Path $seedScript) {
-        Write-Header "Seeding Secure Transport"
-        & $seedScript
-    }
-
-    $seedUsersScript = Join-Path $root "seed-users.ps1"
-    if (Test-Path $seedUsersScript) {
-        Write-Header "Seeding additional users"
-        & $seedUsersScript
     }
 }
 
@@ -479,21 +545,56 @@ npm run dev
 $trackedPids | Out-File $pidFile -Force
 Write-Info "Process IDs saved to .debug-pids"
 
-# ---- Quick health check (non-blocking) ----------------------
+# ---- Wait for Function hosts to be ready --------------------
 if (-not $WaitDebugger) {
-    Write-Header "Checking Function hosts"
-    Write-Info "Giving hosts a few seconds to start..."
-    Start-Sleep 5
+    Write-Header "Waiting for Function hosts to start"
 
-    foreach ($svc in @(
-        @{ Name = "Functions";      Url = "http://localhost:7071/api/query/orders" },
-        @{ Name = "Auth Functions";  Url = "http://localhost:7072/api/auth/me" }
-    )) {
+    # Poll Auth Functions (port 7072) — this one is blocking for seeding
+    $authReady = $false
+    $retries = 30
+    while ($retries -gt 0 -and -not $authReady) {
         try {
-            $null = Invoke-WebRequest -Uri $svc.Url -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
-            Write-Ok "$($svc.Name) is responding."
+            $r = Invoke-WebRequest -Uri "http://localhost:7072/api/auth/me" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+            $authReady = $true
         } catch {
-            Write-Warn "$($svc.Name) not responding yet — check its terminal window for errors."
+            # 401 Unauthorized also means the API is responding (just not authed)
+            if ($_.Exception.Response.StatusCode.Value__ -in @(401, 404)) {
+                $authReady = $true
+            } else {
+                Start-Sleep 2
+                Write-Host "." -NoNewline
+                $retries--
+            }
+        }
+    }
+    Write-Host ""
+    if ($authReady) { Write-Ok "Auth Functions responding on :7072" }
+    else { Write-Warn "Auth Functions not responding after 60s — seeding may fail" }
+
+    # Also check main Functions (non-blocking)
+    try {
+        $null = Invoke-WebRequest -Uri "http://localhost:7071/api/query/orders" -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+        Write-Ok "Functions responding on :7071"
+    } catch {
+        if ($_.Exception.Response.StatusCode.Value__ -in @(401, 404)) {
+            Write-Ok "Functions responding on :7071"
+        } else {
+            Write-Warn "Functions not responding yet — check its terminal window for errors."
+        }
+    }
+
+    # ---- Seed Secure Transport + additional users (API-based) ----
+    if (-not $SkipMigrations) {
+        $seedScript = Join-Path $root "seed-secure-transport.ps1"
+        if (Test-Path $seedScript) {
+            Write-Header "Seeding Secure Transport"
+            & $seedScript
+        }
+
+        $seedUsersScript = Join-Path $root "seed-users.ps1"
+        if (Test-Path $seedUsersScript) {
+            Write-Header "Seeding additional users"
+            & $seedUsersScript
         }
     }
 }
@@ -511,9 +612,10 @@ Write-Host ""
 Write-Host "  Applications (native — debuggable):"
 Write-Host "    Functions API    " -NoNewline; Write-Host "http://localhost:7071/api" -ForegroundColor Green
 Write-Host "    Auth API         " -NoNewline; Write-Host "http://localhost:7072/api" -ForegroundColor Green
+Write-Host "    Swagger UI       " -NoNewline; Write-Host "http://localhost:7071/api/swagger" -ForegroundColor Green
 if (-not $NoFrontend) {
     Write-Host "    Frontend         " -NoNewline; Write-Host "http://localhost:3000" -ForegroundColor Green
-    Write-Host "    Demo App         " -NoNewline; Write-Host "http://localhost:3001" -ForegroundColor Yellow
+    Write-Host "    Demo Simulator   " -NoNewline; Write-Host "http://localhost:3001" -ForegroundColor Yellow
 }
 Write-Host ""
 
@@ -544,6 +646,11 @@ Write-Host "  Commands:" -ForegroundColor Cyan
 Write-Host "    .\deploy-debug.ps1 -Stop            Stop all debug services"
 Write-Host "    .\deploy-debug.ps1 -SkipMigrations  Restart without re-migrating"
 Write-Host "    docker compose logs -f sql           Tail SQL Server logs"
+Write-Host ""
+
+$deployStopwatch.Stop()
+Write-Host "  Deployment completed in " -NoNewline
+Write-Host (Format-Duration $deployStopwatch) -ForegroundColor Cyan
 Write-Host ""
 
 # Open browsers and credentials

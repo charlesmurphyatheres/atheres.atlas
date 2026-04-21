@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(netstat -ano)",
+      "Bash(npm run *)",
+      "Bash(Get-Process -Name \"pwsh\",\"func\",\"node\" -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object -First 10)",
+      "Bash(powershell -Command \"Get-Process -Name pwsh,func,node -ErrorAction SilentlyContinue | Format-Table Id,ProcessName,MainWindowTitle -AutoSize\")"
+    ]
+  }
+}
