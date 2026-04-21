@@ -19,21 +19,31 @@ $ErrorActionPreference = "Stop"
 # 1. CONFIGURATION — fill in before running
 # =============================================================
 
-$Location           = "eastus2"
+# Load secrets from .env (git-ignored)
+$_envFile = Join-Path $PSScriptRoot ".env"
+$_envVars = @{}
+if (Test-Path $_envFile) {
+    Get-Content $_envFile | Where-Object { $_ -match '^\s*[^#]' -and $_ -match '=' } | ForEach-Object {
+        $p = $_ -split '=', 2; $_envVars[$p[0].Trim()] = $p[1].Trim().Trim('"')
+    }
+}
+
+$Location           = "centralus"
 $ResourceGroup      = "rg-atheres-atlas"
 $CustomDomain       = "www.atlasdeliver.com"
 $PublicUrl           = "https://www.atlasdeliver.com"
 
 # SQL
-$SqlServerName      = "atlas-sql-$(Get-Random -Maximum 9999)"
+$SqlServerName      = "atlas-sql-atheres"
 $SqlDbName          = "AtheresAtlas"
 $SqlAdminUser       = "atlas-admin"
-$SqlAdminPassword   = Read-Host -Prompt "SQL admin password (min 8 chars, mixed case/digit/symbol)" -AsSecureString
-$SqlAdminPasswordPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SqlAdminPassword))
+$SqlAdminPasswordPlain = if ($_envVars["MSSQL_SA_PASSWORD"]) { $_envVars["MSSQL_SA_PASSWORD"] } else {
+    $sp = Read-Host -Prompt "SQL admin password" -AsSecureString
+    [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sp))
+}
 
 # Storage
-$StorageAccount     = "statheresatlas$(Get-Random -Maximum 9999)"
+$StorageAccount     = "statheresatlasprod"
 
 # Service Bus
 $ServiceBusNs       = "sb-atheres-atlas"
@@ -47,7 +57,7 @@ $FuncAppMain        = "func-atlas-main"
 $FuncAppAuth        = "func-atlas-auth"
 
 # Frontend
-$FrontendStorage    = "statlasfe$(Get-Random -Maximum 9999)"
+$FrontendStorage    = "statlasfe0001"
 
 # Front Door
 $FrontDoorName      = "fd-atheres-atlas"
@@ -57,14 +67,14 @@ $FrontDoorProfile   = "fdp-atheres-atlas"
 $LogWorkspace       = "log-atheres-atlas"
 $AppInsights        = "ai-atheres-atlas"
 
-# Third-party keys — fill these in
-$GoogleMapsApiKey    = "<your-google-maps-api-key>"
-$SendGridApiKey      = "<your-sendgrid-api-key>"
+# Third-party keys (from .env)
+$GoogleMapsApiKey    = if ($_envVars["GOOGLE_MAPS_API_KEY"]) { $_envVars["GOOGLE_MAPS_API_KEY"] } else { "<your-google-maps-api-key>" }
+$SendGridApiKey      = if ($_envVars["SENDGRID_API_KEY"])    { $_envVars["SENDGRID_API_KEY"] }    else { "<your-sendgrid-api-key>" }
 $SendGridFromEmail   = "noreply@atlasdeliver.com"
 $SendGridFromName    = "Atheres Atlas Delivery"
-$TwilioAccountSid   = "<your-twilio-account-sid>"
-$TwilioAuthToken    = "<your-twilio-auth-token>"
-$TwilioFromNumber   = "<+15551234567>"
+
+# Demo app
+$DemoStorage         = "statlasdemo0001"
 
 # JWT — generate a fresh secret for production
 $JwtSecretKey       = [Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Maximum 256 }) -as [byte[]])
@@ -83,10 +93,39 @@ $SeedAdminPassword  = ""
 
 Write-Host "`n=== Logging in to Azure ===" -ForegroundColor Cyan
 az login
+az account set --subscription "171bf58a-ae31-415c-ad50-85ec2b520edb"
 az account show --output table
 
 # =============================================================
-# 3. RESOURCE GROUP
+# 3. CLEAN UP PREVIOUS DEPLOYMENT (idempotent)
+# =============================================================
+
+$rgExists = az group exists --name $ResourceGroup 2>$null
+if ($rgExists -eq "true") {
+    Write-Host "`n=== Existing deployment found: $ResourceGroup ===" -ForegroundColor Yellow
+    Write-Host "  Deleting resource group to ensure clean deployment..." -ForegroundColor Yellow
+    az group delete --name $ResourceGroup --yes --no-wait --output none
+
+    # Wait for deletion to complete
+    Write-Host "  Waiting for deletion..." -ForegroundColor Gray
+    $retries = 60
+    while ($retries -gt 0) {
+        $still = az group exists --name $ResourceGroup 2>$null
+        if ($still -ne "true") { break }
+        Start-Sleep 10
+        Write-Host "." -NoNewline
+        $retries--
+    }
+    Write-Host ""
+    if ($retries -eq 0) {
+        Write-Host "  [WARN] Resource group still deleting. Proceeding anyway..." -ForegroundColor Yellow
+    } else {
+        Write-Host "  [OK] Previous deployment cleaned up." -ForegroundColor Green
+    }
+}
+
+# =============================================================
+# 4. RESOURCE GROUP
 # =============================================================
 
 Write-Host "`n=== Creating resource group: $ResourceGroup ===" -ForegroundColor Cyan
@@ -167,27 +206,23 @@ az servicebus namespace create `
     --sku Basic `
     --output none
 
-# Queue definitions: Name, LockDuration (ISO 8601), MaxDeliveryCount, TTL, DeadLettering
+# Queue definitions
 $queues = @(
-    @{ Name="atlas-orders-ingest";        Lock="PT60S";  MaxDel=10; TTL="PT1H";  DLQ=$true  },
-    @{ Name="atlas-routes-optimize";      Lock="PT5M";   MaxDel=5;  TTL="PT1H";  DLQ=$true  },
-    @{ Name="atlas-confirmations-send";   Lock="PT60S";  MaxDel=3;  TTL="PT1H";  DLQ=$true  },
-    @{ Name="atlas-confirmations-received"; Lock="PT30S"; MaxDel=5;  TTL="PT1H";  DLQ=$true  },
-    @{ Name="atlas-reschedule";           Lock="PT5M";   MaxDel=5;  TTL="PT1H";  DLQ=$true  },
-    @{ Name="atlas-notifications";        Lock="PT30S";  MaxDel=3;  TTL="PT10M"; DLQ=$false },
-    @{ Name="atlas-audit";                Lock="PT60S";  MaxDel=10; TTL="PT1H";  DLQ=$true  }
+    "atlas-orders-ingest",
+    "atlas-routes-optimize",
+    "atlas-confirmations-send",
+    "atlas-confirmations-received",
+    "atlas-reschedule",
+    "atlas-notifications",
+    "atlas-audit"
 )
 
 foreach ($q in $queues) {
-    Write-Host "  Creating queue: $($q.Name)" -ForegroundColor Gray
+    Write-Host "  Creating queue: $q" -ForegroundColor Gray
     az servicebus queue create `
         --resource-group $ResourceGroup `
         --namespace-name $ServiceBusNs `
-        --name $q.Name `
-        --lock-duration $q.Lock `
-        --max-delivery-count $q.MaxDel `
-        --default-message-time-to-live $q.TTL `
-        --dead-lettering-on-message-expiration $q.DLQ `
+        --name $q `
         --output none
 }
 
@@ -272,9 +307,6 @@ az functionapp config appsettings set `
         "SendGridApiKey=$SendGridApiKey" `
         "SendGridFromEmail=$SendGridFromEmail" `
         "SendGridFromName=$SendGridFromName" `
-        "TwilioAccountSid=$TwilioAccountSid" `
-        "TwilioAuthToken=$TwilioAuthToken" `
-        "TwilioFromNumber=$TwilioFromNumber" `
         "JwtSecretKey=$JwtSecretKey" `
         "JwtIssuer=$JwtIssuer" `
         "JwtAudience=$JwtAudience" `
@@ -357,7 +389,33 @@ $FrontendOrigin = (az storage account show `
     --query "primaryEndpoints.web" -o tsv).TrimEnd('/')
 
 # =============================================================
-# 12. AZURE FRONT DOOR (SSL + Custom Domain + Routing)
+# 12. DEMO APP STORAGE (Static Website)
+# =============================================================
+
+Write-Host "`n=== Creating Demo App Storage: $DemoStorage ===" -ForegroundColor Cyan
+az storage account create `
+    --resource-group $ResourceGroup `
+    --name $DemoStorage `
+    --location $Location `
+    --sku Standard_LRS `
+    --kind StorageV2 `
+    --min-tls-version TLS1_2 `
+    --output none
+
+az storage blob service-properties update `
+    --account-name $DemoStorage `
+    --static-website `
+    --index-document "index.html" `
+    --404-document "index.html" `
+    --output none
+
+$DemoOrigin = (az storage account show `
+    --resource-group $ResourceGroup `
+    --name $DemoStorage `
+    --query "primaryEndpoints.web" -o tsv).TrimEnd('/')
+
+# =============================================================
+# 13. AZURE FRONT DOOR (SSL + Custom Domain + Routing)
 # =============================================================
 
 Write-Host "`n=== Creating Front Door: $FrontDoorName ===" -ForegroundColor Cyan
@@ -393,7 +451,9 @@ az afd origin-group create `
     --probe-request-type GET `
     --probe-protocol Https `
     --probe-path "/" `
-    --probe-interval-in-seconds 30 `
+    --probe-interval-in-seconds 120 `
+    --sample-size 4 `
+    --successful-samples-required 3 `
     --output none
 
 $FrontendHost = ($FrontendOrigin -replace "https://", "")
@@ -418,8 +478,10 @@ az afd origin-group create `
     --origin-group-name "og-functions-main" `
     --probe-request-type GET `
     --probe-protocol Https `
-    --probe-path "/api/query/orders" `
-    --probe-interval-in-seconds 30 `
+    --probe-path "/" `
+    --probe-interval-in-seconds 120 `
+    --sample-size 4 `
+    --successful-samples-required 3 `
     --output none
 
 az afd origin create `
@@ -443,8 +505,10 @@ az afd origin-group create `
     --origin-group-name "og-functions-auth" `
     --probe-request-type GET `
     --probe-protocol Https `
-    --probe-path "/api/auth/me" `
-    --probe-interval-in-seconds 30 `
+    --probe-path "/" `
+    --probe-interval-in-seconds 120 `
+    --sample-size 4 `
+    --successful-samples-required 3 `
     --output none
 
 az afd origin create `
@@ -461,59 +525,33 @@ az afd origin create `
     --enabled-state Enabled `
     --output none
 
-# ----- Routes (order matters — most specific first) -----
+# ----- Routes (most specific first, all linked to default domain) -----
 
-# /api/negotiate* → main functions (SignalR)
-az afd route create `
-    --resource-group $ResourceGroup `
-    --profile-name $FrontDoorProfile `
-    --endpoint-name $FrontDoorName `
-    --route-name "route-signalr" `
-    --origin-group "og-functions-main" `
-    --patterns-to-match "/api/negotiate/*" `
-    --supported-protocols Https `
-    --forwarding-protocol HttpsOnly `
-    --https-redirect Enabled `
-    --output none
+$routeDefs = @(
+    @{ Name="route-signalr";     Group="og-functions-main"; Pattern="/api/negotiate/*" },
+    @{ Name="route-auth";        Group="og-functions-auth"; Pattern="/api/auth/*" },
+    @{ Name="route-users";       Group="og-functions-auth"; Pattern="/api/users/*" },
+    @{ Name="route-companies";   Group="og-functions-auth"; Pattern="/api/companies/*" },
+    @{ Name="route-warehouses";  Group="og-functions-auth"; Pattern="/api/warehouses/*" },
+    @{ Name="route-hubs";        Group="og-functions-auth"; Pattern="/api/hubs/*" },
+    @{ Name="route-api";         Group="og-functions-main"; Pattern="/api/*" },
+    @{ Name="route-frontend";    Group="og-frontend";       Pattern="/*" }
+)
 
-# /api/auth/* → auth functions
-az afd route create `
-    --resource-group $ResourceGroup `
-    --profile-name $FrontDoorProfile `
-    --endpoint-name $FrontDoorName `
-    --route-name "route-auth" `
-    --origin-group "og-functions-auth" `
-    --patterns-to-match "/api/auth/*" `
-    --supported-protocols Https `
-    --forwarding-protocol HttpsOnly `
-    --https-redirect Enabled `
-    --output none
-
-# /api/* → main functions
-az afd route create `
-    --resource-group $ResourceGroup `
-    --profile-name $FrontDoorProfile `
-    --endpoint-name $FrontDoorName `
-    --route-name "route-api" `
-    --origin-group "og-functions-main" `
-    --patterns-to-match "/api/*" `
-    --supported-protocols Https `
-    --forwarding-protocol HttpsOnly `
-    --https-redirect Enabled `
-    --output none
-
-# /* → frontend (catch-all, must be last)
-az afd route create `
-    --resource-group $ResourceGroup `
-    --profile-name $FrontDoorProfile `
-    --endpoint-name $FrontDoorName `
-    --route-name "route-frontend" `
-    --origin-group "og-frontend" `
-    --patterns-to-match "/*" `
-    --supported-protocols Https Http `
-    --forwarding-protocol HttpsOnly `
-    --https-redirect Enabled `
-    --output none
+foreach ($r in $routeDefs) {
+    Write-Host "  Creating route: $($r.Name) -> $($r.Pattern)" -ForegroundColor Gray
+    az afd route create `
+        --resource-group $ResourceGroup `
+        --profile-name $FrontDoorProfile `
+        --endpoint-name $FrontDoorName `
+        --route-name $r.Name `
+        --origin-group $r.Group `
+        --patterns-to-match $r.Pattern `
+        --supported-protocols Https Http `
+        --forwarding-protocol HttpsOnly `
+        --link-to-default-domain Enabled `
+        --output none
+}
 
 # ----- Custom Domain + Managed SSL Certificate -----
 
@@ -543,6 +581,55 @@ $DomainValidation = (az afd custom-domain show `
     --custom-domain-name "www-atlasdeliver" `
     --query "validationProperties.validationToken" -o tsv)
 
+# ----- Pause: wait for DNS records to be set -----
+Write-Host ""
+Write-Host "=============================================================" -ForegroundColor Yellow
+Write-Host "  ACTION REQUIRED - Add DNS records in GoDaddy" -ForegroundColor Yellow
+Write-Host "=============================================================" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  Go to GoDaddy DNS Management for atlasdeliver.com and add:" -ForegroundColor White
+Write-Host ""
+Write-Host "  Record 1:" -ForegroundColor Cyan
+Write-Host "    Type:  CNAME"
+Write-Host "    Name:  www"
+Write-Host "    Value: $FrontDoorHostname"
+Write-Host ""
+Write-Host "  Record 2:" -ForegroundColor Cyan
+Write-Host "    Type:  TXT"
+Write-Host "    Name:  _dnsauth.www"
+Write-Host "    Value: $DomainValidation"
+Write-Host ""
+Write-Host "  After adding both records, wait 1-2 minutes for propagation." -ForegroundColor Gray
+Write-Host ""
+
+Read-Host "  Press ENTER when DNS records are set (or Ctrl+C to abort)"
+
+# Verify DNS propagation
+Write-Host "`n  Checking DNS propagation..." -ForegroundColor Gray
+$retries = 12
+$validated = $false
+while ($retries -gt 0 -and -not $validated) {
+    $status = (az afd custom-domain show `
+        --resource-group $ResourceGroup `
+        --profile-name $FrontDoorProfile `
+        --custom-domain-name "www-atlasdeliver" `
+        --query "domainValidationState" -o tsv 2>$null)
+    if ($status -eq "Approved") {
+        $validated = $true
+    } else {
+        Write-Host "  Validation state: $status - waiting 30s..." -ForegroundColor Gray
+        Start-Sleep 30
+        $retries--
+    }
+}
+
+if ($validated) {
+    Write-Host "  DNS validated! SSL certificate is provisioning." -ForegroundColor Green
+} else {
+    Write-Host "  DNS not yet validated. SSL will provision automatically once records propagate." -ForegroundColor Yellow
+    Write-Host "  Continuing with deployment..." -ForegroundColor Gray
+}
+
 # =============================================================
 # 13. RUN EF MIGRATIONS
 # =============================================================
@@ -568,6 +655,20 @@ finally {
     Pop-Location
 }
 
+# Import reference data
+Write-Host "`n=== Importing Reference Data ===" -ForegroundColor Cyan
+$importScript = Join-Path $ProjectRoot "import-data.ps1"
+if (Test-Path $importScript) {
+    pwsh -File $importScript -ConnectionString $SqlConnectionString
+}
+
+# Seed Secure Transport company
+Write-Host "`n=== Seeding Secure Transport ===" -ForegroundColor Cyan
+$seedScript = Join-Path $ProjectRoot "seed-secure-transport.ps1"
+if (Test-Path $seedScript) {
+    pwsh -File $seedScript -ConnectionString $SqlConnectionString -IdentityConnectionString $SqlConnectionString
+}
+
 # =============================================================
 # 14. SUMMARY
 # =============================================================
@@ -585,8 +686,10 @@ Write-Host "SignalR:             $SignalRName"
 Write-Host "Function App (Main): $FuncAppMain.azurewebsites.net"
 Write-Host "Function App (Auth): $FuncAppAuth.azurewebsites.net"
 Write-Host "Frontend:            $FrontendOrigin"
+Write-Host "Demo App:            $DemoOrigin"
 Write-Host "Front Door:          $FrontDoorHostname"
 Write-Host "JWT Secret:          $JwtSecretKey"
+Write-Host "Swagger:             https://$FuncAppMain.azurewebsites.net/api/swagger"
 
 Write-Host "`n=============================================================" -ForegroundColor Yellow
 Write-Host "  DNS RECORDS REQUIRED" -ForegroundColor Yellow
@@ -615,6 +718,14 @@ Write-Host "
      cd Atheres.Atlas.FrontEnd
      npm ci && npm run build
      az storage blob upload-batch -s dist -d `"`$web`" --account-name $FrontendStorage --overwrite
-5. Clear SeedAdminPassword after first deploy:
+5. Deploy Demo App:
+     cd Atheres.Atlas.Demo
+     npm ci && npm run build
+     az storage blob upload-batch -s dist -d `"`$web`" --account-name $DemoStorage --overwrite
+6. Clear SeedAdminPassword after first deploy:
      az functionapp config appsettings set -g $ResourceGroup -n $FuncAppAuth --settings SeedAdminPassword=
+
+  Users:
+    SuperAdmin  charles.murphy@atheres.com  (password set during deploy)
+    Admin       steven@gmail.com / Secure@1234567890  (Secure Transport)
 " -ForegroundColor White

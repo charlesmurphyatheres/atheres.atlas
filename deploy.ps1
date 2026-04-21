@@ -99,7 +99,7 @@ Get-Content $envFile | Where-Object { $_ -match '^\s*[^#]' -and $_ -match '=' } 
 
 $requiredVars = @(
     "MSSQL_SA_PASSWORD", "GOOGLE_MAPS_API_KEY", "SENDGRID_API_KEY",
-    "TWILIO_ACCOUNT_SID", "AZURE_SIGNALR_CONNECTION", "JWT_SECRET_KEY"
+    "AZURE_SIGNALR_CONNECTION", "JWT_SECRET_KEY"
 )
 
 $missing = 0
@@ -144,7 +144,7 @@ Write-Header "Building application images"
 
 $buildArg = if ($Build) { "--build" } else { "" }
 
-Invoke-Expression "docker compose build $buildArg --parallel migrations functions auth frontend"
+Invoke-Expression "docker compose build $buildArg --parallel migrations functions auth frontend demo"
 if ($LASTEXITCODE -ne 0) { Write-Err "Build failed."; exit 1 }
 Write-Ok "Images built."
 
@@ -227,7 +227,7 @@ if (Test-Path $importScript) {
 # ---- Start application services -----------------------------
 Write-Header "Starting application services"
 
-docker compose up -d functions auth frontend nginx
+docker compose up -d functions auth frontend demo nginx
 
 # Wait for nginx health
 Write-Info "Waiting for application to be healthy..."
@@ -251,28 +251,60 @@ if (-not $appReady) {
     exit 1
 }
 
+# ---- Seed Secure Transport company ----------------------------
+Write-Header "Seeding Secure Transport"
+$seedScript = Join-Path $PSScriptRoot "seed-secure-transport.ps1"
+if (Test-Path $seedScript) {
+    $saPassword = [System.Environment]::GetEnvironmentVariable("MSSQL_SA_PASSWORD")
+    $dockerBusinessConn = "Server=localhost;Database=AtheresAtlas;User Id=sa;Password=$saPassword;TrustServerCertificate=True;"
+    $dockerIdentityConn = "Server=localhost;Database=AtheresAtlas;User Id=sa;Password=$saPassword;TrustServerCertificate=True;"
+    & $seedScript -ConnectionString $dockerBusinessConn -IdentityConnectionString $dockerIdentityConn
+}
+
+# ---- Seed additional global users ------------------------------
+Write-Header "Seeding additional users"
+$seedUsersScript = Join-Path $PSScriptRoot "seed-users.ps1"
+if (Test-Path $seedUsersScript) {
+    & $seedUsersScript -AuthApiUrl "http://localhost:7072"
+}
+
 # ---- Summary ------------------------------------------------
 Write-Header "Atheres Atlas is running"
 
 Write-Host ""
 Write-Host "  Application      " -NoNewline; Write-Host "http://localhost:9708"              -ForegroundColor Green
-Write-Host "  Auth API         " -NoNewline; Write-Host "http://localhost:9708/api/auth"    -ForegroundColor Green
-Write-Host "  Functions API    " -NoNewline; Write-Host "http://localhost:7071/api"    -ForegroundColor Green
-Write-Host "  Auth Functions   " -NoNewline; Write-Host "http://localhost:7072/api"    -ForegroundColor Green
+Write-Host "  Demo Simulator   " -NoNewline; Write-Host "http://localhost:3001"              -ForegroundColor Green
+Write-Host "  Swagger UI       " -NoNewline; Write-Host "http://localhost:7071/api/swagger"  -ForegroundColor Green
+Write-Host "  Functions API    " -NoNewline; Write-Host "http://localhost:7071/api"          -ForegroundColor Gray
+Write-Host "  Auth Functions   " -NoNewline; Write-Host "http://localhost:7072/api"          -ForegroundColor Gray
 Write-Host "  SQL Server       " -NoNewline; Write-Host "localhost:1433  (sa / `$MSSQL_SA_PASSWORD)" -ForegroundColor Gray
-Write-Host "  Service Bus      " -NoNewline; Write-Host "localhost:5672"               -ForegroundColor Gray
-Write-Host "  Azurite Blob     " -NoNewline; Write-Host "localhost:10000"              -ForegroundColor Gray
+Write-Host "  Service Bus      " -NoNewline; Write-Host "localhost:5672"                      -ForegroundColor Gray
+Write-Host "  Azurite Blob     " -NoNewline; Write-Host "localhost:10000"                     -ForegroundColor Gray
 Write-Host ""
+
+# ---- Print all seeded user credentials --------------------------
+Write-Host "==============================================================" -ForegroundColor Yellow
+Write-Host "  SEEDED USERS" -ForegroundColor Yellow
+Write-Host "==============================================================" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  Role        Email                        Password                 Scope"             -ForegroundColor White
+Write-Host "  ----------  ---------------------------  -----------------------  ------------------"  -ForegroundColor DarkGray
+Write-Host "  SuperAdmin  charles.murphy@atheres.com   Albeniz<18651909>        (global)"           -ForegroundColor Green
+Write-Host "  SuperAdmin  ken@atheres.com              Phone@3313059708         (global)"           -ForegroundColor Green
+Write-Host "  Admin       steven@gmail.com             Secure@1234567890        Secure Transport"   -ForegroundColor Green
+Write-Host ""
+
 Write-Host "  Useful commands:"
 Write-Host "    docker compose ps                   -> container status"
 Write-Host "    docker compose logs -f              -> tail all logs"
-Write-Host "    docker compose logs -f functions    -> functions only"
-Write-Host "    docker compose logs -f auth         -> auth functions only"
 Write-Host "    .\deploy.ps1 -Down                  -> stop everything"
 Write-Host "    .\deploy.ps1 -Clean                 -> stop + wipe volumes"
 Write-Host ""
 
+$credFile = Join-Path $PSScriptRoot "CREDENTIALS.txt"
+if (Test-Path $credFile) { Start-Process $credFile }
 Start-Process "http://localhost:9708"
+Start-Process "http://localhost:3001"
 
 if ($Logs) {
     Write-Info "Tailing logs (Ctrl+C to exit)..."

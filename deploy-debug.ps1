@@ -281,6 +281,12 @@ if (-not $SkipMigrations) {
         Write-Header "Seeding Secure Transport"
         & $seedScript
     }
+
+    $seedUsersScript = Join-Path $root "seed-users.ps1"
+    if (Test-Path $seedUsersScript) {
+        Write-Header "Seeding additional users"
+        & $seedUsersScript
+    }
 }
 
 # ---- Kill stale func hosts before building -------------------
@@ -511,6 +517,18 @@ if (-not $NoFrontend) {
 }
 Write-Host ""
 
+# ---- Print all seeded user credentials --------------------------
+Write-Host "==============================================================" -ForegroundColor Yellow
+Write-Host "  SEEDED USERS" -ForegroundColor Yellow
+Write-Host "==============================================================" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  Role        Email                        Password                 Scope"             -ForegroundColor White
+Write-Host "  ----------  ---------------------------  -----------------------  ------------------"  -ForegroundColor DarkGray
+Write-Host "  SuperAdmin  charles.murphy@atheres.com   Albeniz<18651909>        (global)"           -ForegroundColor Green
+Write-Host "  SuperAdmin  ken@atheres.com              Phone@3313059708         (global)"           -ForegroundColor Green
+Write-Host "  Admin       steven@gmail.com             Secure@1234567890        Secure Transport"   -ForegroundColor Green
+Write-Host ""
+
 if ($WaitDebugger) {
     Write-Host "  *** WAITING FOR DEBUGGER ***" -ForegroundColor Yellow
     Write-Host "  Function hosts are paused — attach a debugger to continue." -ForegroundColor Yellow
@@ -528,7 +546,10 @@ Write-Host "    .\deploy-debug.ps1 -SkipMigrations  Restart without re-migrating
 Write-Host "    docker compose logs -f sql           Tail SQL Server logs"
 Write-Host ""
 
-# Open browser to frontend
+# Open browsers and credentials
 if (-not $NoFrontend -and -not $WaitDebugger) {
+    $credFile = Join-Path $root "CREDENTIALS.txt"
+    if (Test-Path $credFile) { Start-Process $credFile }
     Start-Process "http://localhost:3000"
+    Start-Process "http://localhost:3001"
 }

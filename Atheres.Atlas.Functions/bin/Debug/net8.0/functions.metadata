@@ -516,6 +516,33 @@
     ]
   },
   {
+    "name": "mgmt-orders-reset",
+    "scriptFile": "Atheres.Atlas.Functions.dll",
+    "entryPoint": "Atheres.Atlas.Functions.Agents.ManagementAgent.ResetAllOrders",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "req",
+        "direction": "In",
+        "type": "httpTrigger",
+        "authLevel": "Anonymous",
+        "methods": [
+          "delete"
+        ],
+        "route": "orders/all",
+        "properties": {}
+      },
+      {
+        "name": "$return",
+        "type": "http",
+        "direction": "Out"
+      }
+    ]
+  },
+  {
     "name": "Negotiate",
     "scriptFile": "Atheres.Atlas.Functions.dll",
     "entryPoint": "Atheres.Atlas.Functions.Agents.NotificationAgent.Negotiate",

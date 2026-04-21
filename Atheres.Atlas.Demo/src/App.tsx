@@ -1,298 +1,183 @@
 import { useEffect, useState } from 'react'
-import { login, getCompanies, getWarehouses, getStores, ingestOrders, readyToPickup } from './api'
+import { getCompanies, getWarehouses, getStores, ingestOrder, resetAllOrders } from './api'
 import type { Warehouse, Store } from './api'
-import { format, addDays, eachDayOfInterval } from 'date-fns'
+import { format, addDays, subDays } from 'date-fns'
 
-function randomItem<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)]
+const PRODUCTS = [
+  { sku: 'THC-GUMMY-100', name: 'THC Gummies 100mg', category: 'Edibles' },
+  { sku: 'CBD-TINCTURE-30', name: 'CBD Tincture 30ml', category: 'Tinctures' },
+  { sku: 'PRE-ROLL-5PK', name: 'Pre-Roll 5-Pack', category: 'Flower' },
+  { sku: 'VAPE-CART-1G', name: 'Vape Cartridge 1g', category: 'Vapes' },
+  { sku: 'LIVE-RESIN-05', name: 'Live Resin 0.5g', category: 'Concentrates' },
+  { sku: 'TOPICAL-BALM', name: 'CBD Topical Balm', category: 'Topicals' },
+  { sku: 'EDIBLE-CHOC-50', name: 'Chocolate Bar 50mg', category: 'Edibles' },
+  { sku: 'FLOWER-3G-IND', name: 'Indica Flower 3.5g', category: 'Flower' },
+  { sku: 'FLOWER-3G-SAT', name: 'Sativa Flower 3.5g', category: 'Flower' },
+  { sku: 'DISP-VAPE-300', name: 'Disposable Vape 300mg', category: 'Vapes' },
+]
+
+function randomItems() {
+  const count = Math.floor(Math.random() * 4) + 1
+  const shuffled = [...PRODUCTS].sort(() => Math.random() - 0.5)
+  return shuffled.slice(0, count).map((p) => ({ ...p, quantity: Math.floor(Math.random() * 48) + 1 }))
 }
 
 export default function App() {
-  const [loggedIn, setLoggedIn] = useState(!!localStorage.getItem('demo_access_token'))
-  const [loginError, setLoginError] = useState('')
+  const [companies, setCompanies] = useState<{ id: string; name: string }[]>([])
+  const [warehouses, setWarehouses] = useState<Warehouse[]>([])
+  const [stores, setStores] = useState<Store[]>([])
 
-  async function handleLogin(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault()
-    setLoginError('')
-    const form = new FormData(e.currentTarget)
+  const [company, setCompany] = useState('')
+  const [warehouse, setWarehouse] = useState('')
+  const [store, setStore] = useState('')
+  const [count, setCount] = useState(5)
+  const [date, setDate] = useState(format(new Date(), 'yyyy-MM-dd'))
+
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+
+  useEffect(() => { getCompanies().then(setCompanies).catch(() => {}) }, [])
+
+  useEffect(() => {
+    if (!company) { setWarehouses([]); setStores([]); return }
+    Promise.all([getWarehouses(), getStores()])
+      .then(([wh, st]) => {
+        const f = wh.filter((w) => w.companyId === company)
+        setWarehouses(f)
+        setWarehouse(f[0]?.id ?? '')
+        setStores(st.filter((s) => s.licenseNumber))
+        setStore('')
+      })
+      .catch(() => {})
+  }, [company])
+
+  async function generate() {
+    if (!company || !warehouse) return
+    const wh = warehouses.find((w) => w.id === warehouse)!
+    const pool = store ? stores.filter((s) => s.id === store) : stores
+    if (pool.length === 0) return
+
+    setBusy(true); setMsg(''); setErr('')
+    let created = 0
     try {
-      const res = await login(form.get('email') as string, form.get('password') as string)
-      localStorage.setItem('demo_access_token', res.accessToken)
-      localStorage.setItem('demo_refresh_token', res.refreshToken)
-      setLoggedIn(true)
-    } catch {
-      setLoginError('Invalid credentials.')
-    }
+      for (let i = 0; i < count; i++) {
+        const s = pool[Math.floor(Math.random() * pool.length)]
+        await ingestOrder({
+          companySlug: company,
+          warehouseLicenseNumber: wh.licenseNumber,
+          storeLicenseNumber: s.licenseNumber,
+          orderDate: `${date}T00:00:00`,
+          items: randomItems(),
+        })
+        created++
+      }
+      setMsg(`${created} orders created`)
+    } catch { setErr(`Failed after ${created}`) }
+    finally { setBusy(false) }
   }
 
-  function handleLogout() {
-    localStorage.removeItem('demo_access_token')
-    localStorage.removeItem('demo_refresh_token')
-    setLoggedIn(false)
-  }
-
-  if (!loggedIn) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <form onSubmit={handleLogin} className="bg-white rounded-xl border border-gray-200 p-8 w-96 space-y-4">
-          <div className="text-center">
-            <h1 className="text-xl font-bold text-gray-900">Atlas Demo</h1>
-            <p className="text-sm text-gray-500 mt-1">Sign in with SuperAdmin credentials</p>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-            <input name="email" type="email" required
-              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400" />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
-            <input name="password" type="password" required
-              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400" />
-          </div>
-          {loginError && <p className="text-sm text-red-600">{loginError}</p>}
-          <button type="submit"
-            className="w-full px-4 py-2 bg-brand-500 text-white text-sm font-medium rounded-lg hover:bg-brand-600">
-            Sign In
-          </button>
-        </form>
-      </div>
-    )
+  async function reset() {
+    if (!confirm('Delete ALL orders, routes, and products?')) return
+    setBusy(true); setMsg(''); setErr('')
+    try { await resetAllOrders(); setMsg('All data wiped') }
+    catch { setErr('Reset failed') }
+    finally { setBusy(false) }
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <header className="bg-white border-b border-gray-200 shadow-sm">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 bg-brand-500 rounded-lg flex items-center justify-center">
-              <span className="text-white font-bold text-xs">A</span>
+    <div className="min-h-screen bg-gray-50 flex flex-col">
+      {/* Header */}
+      <div className="bg-brand-500 text-white px-4 py-3 text-center font-bold text-lg">
+        Atlas Simulator
+      </div>
+
+      <div className="flex-1 px-4 py-4 space-y-3 max-w-lg mx-auto w-full">
+        {/* Company */}
+        <Select label="Company" value={company} onChange={setCompany}
+          options={companies.map((c) => ({ value: c.id, label: c.name }))} placeholder="Select..." />
+
+        {/* Warehouse */}
+        <Select label="Warehouse" value={warehouse} onChange={setWarehouse} disabled={!company}
+          options={warehouses.filter((w) => w.licenseNumber).map((w) => ({ value: w.id, label: w.businessName }))} placeholder="Select..." />
+
+        {/* Store */}
+        <Select label="Store" value={store} onChange={setStore} disabled={!company}
+          options={[{ value: '', label: 'Random' }, ...stores.map((s) => ({ value: s.id, label: `${s.name} - ${s.city}` }))]} />
+
+        {/* Count */}
+        <div>
+          <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Orders</label>
+          <div className="flex items-center gap-0">
+            <button onClick={() => setCount((c) => Math.max(1, c - 1))}
+              className="h-11 w-12 rounded-l-lg bg-white border border-gray-300 text-xl font-bold text-gray-500 active:bg-gray-100">-</button>
+            <input type="number" value={count} min={1} max={500}
+              onChange={(e) => setCount(Math.max(1, parseInt(e.target.value) || 1))}
+              className="h-11 w-16 text-center border-y border-gray-300 text-lg font-semibold focus:outline-none" />
+            <button onClick={() => setCount((c) => Math.min(500, c + 1))}
+              className="h-11 w-12 rounded-r-lg bg-white border border-gray-300 text-xl font-bold text-gray-500 active:bg-gray-100">+</button>
+            <div className="flex gap-1 ml-3">
+              {[5, 10, 25, 50].map((n) => (
+                <button key={n} onClick={() => setCount(n)}
+                  className={`h-8 px-2.5 rounded-full text-xs font-semibold ${count === n ? 'bg-brand-500 text-white' : 'bg-gray-200 text-gray-600 active:bg-gray-300'}`}>{n}</button>
+              ))}
             </div>
-            <span className="text-lg font-bold text-gray-900">Atlas Demo</span>
-            <span className="text-xs bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-full font-medium">Demo Only</span>
           </div>
-          <button onClick={handleLogout} className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-100">
-            Sign out
-          </button>
         </div>
-      </header>
-      <main className="max-w-6xl mx-auto px-4 py-6">
-        <DemoPanel />
-      </main>
+
+        {/* Date */}
+        <div>
+          <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Date</label>
+          <div className="flex items-center gap-0">
+            <button onClick={() => setDate(format(subDays(new Date(date), 1), 'yyyy-MM-dd'))}
+              className="h-11 w-12 rounded-l-lg bg-white border border-gray-300 text-xl text-gray-400 active:bg-gray-100">&#8249;</button>
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
+              className="h-11 flex-1 text-center border-y border-gray-300 text-sm font-medium focus:outline-none" />
+            <button onClick={() => setDate(format(addDays(new Date(date), 1), 'yyyy-MM-dd'))}
+              className="h-11 w-12 rounded-r-lg bg-white border border-gray-300 text-xl text-gray-400 active:bg-gray-100">&#8250;</button>
+          </div>
+        </div>
+
+        {/* Generate */}
+        <button onClick={generate} disabled={busy || !company || !warehouse}
+          className="w-full h-14 bg-brand-500 text-white text-base font-bold rounded-xl active:bg-brand-700 disabled:opacity-40 transition-colors">
+          {busy ? 'Working...' : `Generate ${count} Order${count !== 1 ? 's' : ''}`}
+        </button>
+
+        {/* Feedback */}
+        {msg && <p className="text-center text-sm font-medium text-green-600">{msg}</p>}
+        {err && <p className="text-center text-sm font-medium text-red-600">{err}</p>}
+
+        {/* Spacer */}
+        <div className="pt-6" />
+
+        {/* Reset */}
+        <button onClick={reset} disabled={busy}
+          className="w-full h-14 bg-red-600 text-white text-base font-bold rounded-xl active:bg-red-800 disabled:opacity-40 transition-colors">
+          {busy ? 'Working...' : 'Reset All Orders'}
+        </button>
+        <p className="text-center text-[11px] text-gray-400">Deletes all orders, routes, and products</p>
+      </div>
     </div>
   )
 }
 
-function DemoPanel() {
-  const [companies, setCompanies] = useState<{ id: string; name: string }[]>([])
-  const [selectedCompany, setSelectedCompany] = useState('')
-  const [warehouses, setWarehouses] = useState<Warehouse[]>([])
-  const [selectedWarehouses, setSelectedWarehouses] = useState<Set<string>>(new Set())
-  const [stores, setStores] = useState<Store[]>([])
-  const [startDate, setStartDate] = useState(format(new Date(), 'yyyy-MM-dd'))
-  const [endDate, setEndDate] = useState(format(addDays(new Date(), 5), 'yyyy-MM-dd'))
-  const [ordersPerDay, setOrdersPerDay] = useState(10)
-  const [loading, setLoading] = useState(false)
-  const [result, setResult] = useState<{ accepted: number; days: number } | null>(null)
-  const [error, setError] = useState('')
-
-  // Ready to pickup state
-  const [pickupWarehouse, setPickupWarehouse] = useState('')
-  const [pickupDateTime, setPickupDateTime] = useState(format(new Date(), "yyyy-MM-dd'T'10:00"))
-  const [pickupLoading, setPickupLoading] = useState(false)
-  const [pickupResult, setPickupResult] = useState<{ batchId: string; orderCount: number; ordersQueuedForRouting: number } | null>(null)
-  const [pickupError, setPickupError] = useState('')
-
-  useEffect(() => {
-    getCompanies().then(setCompanies).catch(() => {})
-  }, [])
-
-  useEffect(() => {
-    if (!selectedCompany) { setWarehouses([]); setStores([]); return }
-    Promise.all([getWarehouses(), getStores()])
-      .then(([wh, st]) => {
-        const filtered = wh.filter((w) => w.companyId === selectedCompany)
-        setWarehouses(filtered)
-        setSelectedWarehouses(new Set(filtered.map((w) => w.id)))
-        setStores(st.filter((s) => s.licenseNumber))
-      })
-      .catch(() => {})
-  }, [selectedCompany])
-
-  function toggleWarehouse(id: string) {
-    setSelectedWarehouses((prev) => {
-      const next = new Set(prev)
-      next.has(id) ? next.delete(id) : next.add(id)
-      return next
-    })
-  }
-
-  async function handleGenerate() {
-    if (!selectedCompany) { setError('Select a company.'); return }
-    if (selectedWarehouses.size === 0) { setError('Select at least one warehouse.'); return }
-    if (stores.length === 0) { setError('No stores with license numbers found.'); return }
-    setError(''); setResult(null); setLoading(true)
-    try {
-      const days = eachDayOfInterval({ start: new Date(startDate), end: new Date(endDate) })
-      const warehouseList = warehouses.filter((w) => selectedWarehouses.has(w.id))
-      let totalAccepted = 0
-      for (const day of days) {
-        const orders = []
-        for (let i = 0; i < ordersPerDay; i++) {
-          const wh = randomItem(warehouseList)
-          const store = randomItem(stores)
-          orders.push({
-            companySlug: selectedCompany,
-            warehouseLicenseNumber: wh.licenseNumber,
-            storeLicenseNumber: store.licenseNumber,
-            orderDate: format(day, "yyyy-MM-dd'T'00:00:00"),
-            notes: `Demo: ${store.name} from ${wh.businessName}`,
-          })
-        }
-        const res = await ingestOrders(orders)
-        totalAccepted += res.accepted
-      }
-      setResult({ accepted: totalAccepted, days: days.length })
-    } catch { setError('Failed to generate orders.') }
-    finally { setLoading(false) }
-  }
-
-  async function handleReadyToPickup() {
-    if (!pickupWarehouse) { setPickupError('Select a warehouse.'); return }
-    setPickupError(''); setPickupResult(null); setPickupLoading(true)
-    try {
-      const wh = warehouses.find((w) => w.id === pickupWarehouse)
-      if (!wh?.licenseNumber) { setPickupError('Warehouse has no license number.'); return }
-      const res = await readyToPickup(selectedCompany, wh.licenseNumber, pickupDateTime)
-      setPickupResult(res)
-    } catch { setPickupError('Failed to trigger pickup.') }
-    finally { setPickupLoading(false) }
-  }
-
+function Select({ label, value, onChange, options, placeholder, disabled }: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  options: { value: string; label: string }[]
+  placeholder?: string
+  disabled?: boolean
+}) {
   return (
-    <div className="space-y-8">
-      {/* Company selection */}
-      <div className="bg-white rounded-xl border border-gray-200 p-6">
-        <label className="block text-sm font-medium text-gray-700 mb-1">Company</label>
-        <select value={selectedCompany} onChange={(e) => setSelectedCompany(e.target.value)}
-          className="w-full max-w-md px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400">
-          <option value="">Select a company...</option>
-          {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
-      </div>
-
-      {selectedCompany && (
-        <>
-          {/* Section 1: Generate Orders */}
-          <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-5">
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">1. Generate Random Orders</h2>
-              <p className="text-sm text-gray-500 mt-0.5">Creates orders with random store/warehouse pairings</p>
-            </div>
-
-            {warehouses.length > 0 && (
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <label className="text-sm font-medium text-gray-700">Warehouses</label>
-                  <div className="flex gap-2">
-                    <button onClick={() => setSelectedWarehouses(new Set(warehouses.map((w) => w.id)))}
-                      className="text-xs text-brand-600 hover:underline">All</button>
-                    <button onClick={() => setSelectedWarehouses(new Set())}
-                      className="text-xs text-gray-400 hover:underline">None</button>
-                  </div>
-                </div>
-                <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                  {warehouses.map((w) => (
-                    <label key={w.id}
-                      className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer transition-colors ${
-                        selectedWarehouses.has(w.id) ? 'border-brand-400 bg-brand-50' : 'border-gray-200 hover:border-gray-300'
-                      }`}>
-                      <input type="checkbox" checked={selectedWarehouses.has(w.id)} onChange={() => toggleWarehouse(w.id)}
-                        className="mt-0.5 rounded border-gray-300 text-brand-500 focus:ring-brand-400" />
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-gray-900 truncate">{w.businessName}</p>
-                        {w.alternateName && <p className="text-xs text-gray-400 truncate">{w.alternateName}</p>}
-                        {w.licenseNumber && <p className="text-xs text-gray-400">#{w.licenseNumber}</p>}
-                      </div>
-                    </label>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="grid sm:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
-                <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
-                <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Orders per day</label>
-                <input type="number" min={1} max={100} value={ordersPerDay}
-                  onChange={(e) => setOrdersPerDay(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
-                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400" />
-              </div>
-            </div>
-
-            <div className="bg-gray-50 rounded-lg p-4 text-sm text-gray-600">
-              Will generate <strong>{ordersPerDay}</strong> orders/day across <strong>{selectedWarehouses.size}</strong> warehouse{selectedWarehouses.size !== 1 ? 's' : ''} from <strong>{startDate}</strong> to <strong>{endDate}</strong>.
-              <br /><span className="text-gray-400">{stores.length} stores available for pairing.</span>
-            </div>
-
-            <div className="flex items-center gap-3">
-              <button onClick={handleGenerate} disabled={loading || !selectedCompany || selectedWarehouses.size === 0}
-                className="px-5 py-2.5 bg-brand-500 text-white text-sm font-medium rounded-lg hover:bg-brand-600 disabled:opacity-50 transition-colors">
-                {loading ? 'Generating...' : 'Generate Orders'}
-              </button>
-              {error && <p className="text-sm text-red-600">{error}</p>}
-              {result && <p className="text-sm text-green-600">Created {result.accepted} orders across {result.days} day{result.days !== 1 ? 's' : ''}.</p>}
-            </div>
-          </div>
-
-          {/* Section 2: Trigger Ready to Pickup */}
-          <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-5">
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">2. Trigger Ready to Pickup</h2>
-              <p className="text-sm text-gray-500 mt-0.5">Simulates a warehouse confirming orders are ready — creates a batch and triggers route optimization</p>
-            </div>
-
-            <div className="grid sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Warehouse</label>
-                <select value={pickupWarehouse} onChange={(e) => setPickupWarehouse(e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400">
-                  <option value="">Select warehouse...</option>
-                  {warehouses.filter((w) => w.licenseNumber).map((w) => (
-                    <option key={w.id} value={w.id}>{w.businessName} ({w.licenseNumber})</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Pickup Date & Time</label>
-                <input type="datetime-local" value={pickupDateTime} onChange={(e) => setPickupDateTime(e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400" />
-              </div>
-            </div>
-
-            <div className="flex items-center gap-3">
-              <button onClick={handleReadyToPickup} disabled={pickupLoading || !pickupWarehouse}
-                className="px-5 py-2.5 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors">
-                {pickupLoading ? 'Scheduling...' : 'Ready to Pickup'}
-              </button>
-              {pickupError && <p className="text-sm text-red-600">{pickupError}</p>}
-              {pickupResult && (
-                <p className="text-sm text-green-600">
-                  Batch created: {pickupResult.orderCount} orders, {pickupResult.ordersQueuedForRouting} queued for routing.
-                </p>
-              )}
-            </div>
-          </div>
-        </>
-      )}
+    <div>
+      <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">{label}</label>
+      <select value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled}
+        className="w-full h-11 px-3 text-sm bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400 disabled:bg-gray-100 disabled:text-gray-400">
+        {placeholder && <option value="">{placeholder}</option>}
+        {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
     </div>
   )
 }

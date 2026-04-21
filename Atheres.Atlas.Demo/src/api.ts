@@ -5,27 +5,6 @@ const api = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
-// Attach token if available
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('demo_access_token')
-  if (token) config.headers.Authorization = `Bearer ${token}`
-  return config
-})
-
-// ---- Auth ----
-
-export async function login(email: string, password: string) {
-  const { data } = await api.post('/auth/login', { email, password })
-  return data as {
-    accessToken: string
-    refreshToken: string
-    userId: string
-    email: string
-    fullName: string
-    roles: string[]
-  }
-}
-
 // ---- Companies ----
 
 export async function getCompanies() {
@@ -65,8 +44,8 @@ export async function getStores(): Promise<Store[]> {
 
 // ---- Orders ----
 
-export async function ingestOrders(orders: unknown[]): Promise<{ accepted: number; orderIds: string[]; errors: string[] }> {
-  const { data } = await api.post('/orders', orders)
+export async function ingestOrder(order: unknown): Promise<{ orderId: string; itemCount: number }> {
+  const { data } = await api.post('/orders', order)
   return data
 }
 
@@ -75,4 +54,10 @@ export async function ingestOrders(orders: unknown[]): Promise<{ accepted: numbe
 export async function readyToPickup(companySlug: string, warehouseLicenseNumber: string, pickupDateTime: string) {
   const { data } = await api.post('/ready-to-pickup', { companySlug, warehouseLicenseNumber, pickupDateTime })
   return data as { batchId: string; orderCount: number; ordersQueuedForRouting: number }
+}
+
+// ---- Reset ----
+
+export async function resetAllOrders(): Promise<void> {
+  await api.delete('/orders/all')
 }

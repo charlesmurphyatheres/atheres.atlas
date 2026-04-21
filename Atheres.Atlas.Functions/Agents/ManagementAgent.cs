@@ -338,4 +338,27 @@ public class ManagementAgent
 
         return new OkObjectResult(new { orderId, status = "Archived" });
     }
+
+    // -----------------------------------------------------------------------
+    // DELETE /api/orders/all  (Demo reset — wipes all orders, items, batches, routes)
+    // -----------------------------------------------------------------------
+    [Function("mgmt-orders-reset")]
+    public async Task<IActionResult> ResetAllOrders(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "delete", Route = "orders/all")]
+        HttpRequest req, CancellationToken ct)
+    {
+        // Delete in dependency order
+        await _db.Database.ExecuteSqlRawAsync("DELETE FROM OrderItems", ct);
+        await _db.Database.ExecuteSqlRawAsync("DELETE FROM Confirmations", ct);
+        await _db.Database.ExecuteSqlRawAsync("DELETE FROM RouteStops", ct);
+        await _db.Database.ExecuteSqlRawAsync("DELETE FROM AuditLogs", ct);
+        await _db.Database.ExecuteSqlRawAsync("DELETE FROM Orders", ct);
+        await _db.Database.ExecuteSqlRawAsync("DELETE FROM Routes", ct);
+        await _db.Database.ExecuteSqlRawAsync("DELETE FROM OrderBatches", ct);
+        await _db.Database.ExecuteSqlRawAsync("DELETE FROM Products", ct);
+
+        _logger.LogWarning("All orders, routes, batches, and products wiped (demo reset)");
+
+        return new OkObjectResult(new { message = "All orders, routes, batches, and products deleted." });
+    }
 }
