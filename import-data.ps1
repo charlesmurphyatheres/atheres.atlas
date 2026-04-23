@@ -40,9 +40,9 @@ if (-not $ConnectionString) {
 
 # ---- Resolve CompanyId -----------------------------------------
 if (-not $CompanyId) {
-    # Use the default company seeded by the multi-tenancy migration
-    $CompanyId = "00000000-0000-0000-0000-000000000001"
-    Write-Info "Using default company: $CompanyId"
+    # Secure Transport is the first onboarded tenant
+    $CompanyId = "10000000-0000-0000-0000-000000000001"
+    Write-Info "Using Secure Transport: $CompanyId"
 }
 
 # ---- Helper: Execute SQL ----------------------------------------

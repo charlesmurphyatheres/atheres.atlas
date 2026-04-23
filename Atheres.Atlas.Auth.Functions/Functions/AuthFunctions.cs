@@ -48,10 +48,9 @@ public class AuthFunctions
     }
 
     // -----------------------------------------------------------------------
-    // POST /api/auth/register
+    // POST /api/auth/register   (caller must be SuperAdmin or Admin)
     // -----------------------------------------------------------------------
     [Function("auth-register")]
-    [AllowAnonymous]
     public async Task<IActionResult> Register(
         [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "auth/register")]
         HttpRequest req,
@@ -75,47 +74,32 @@ public class AuthFunctions
             return new BadRequestObjectResult(new { error = "Email and Password are required." });
         }
 
-        // Determine the company for this new user
-        Guid? targetCompanyId = dto.CompanyId;
-        var callerCompanyId   = GetCallerCompanyId(req);
+        var isSuperAdmin = req.HttpContext.User.IsInRole(Roles.SuperAdmin);
+        var isAdmin      = req.HttpContext.User.IsInRole(Roles.Admin);
 
-        if (req.HttpContext.User.IsInRole(Roles.SuperAdmin))
-        {
-            // SuperAdmin may omit CompanyId (for their own account) or specify any company
-        }
-        else if (req.HttpContext.User.IsInRole(Roles.Admin) && callerCompanyId.HasValue)
+        if (!isSuperAdmin && !isAdmin)
+            return Unauthorized("Only SuperAdmin or Admin may register new users.");
+
+        Guid? targetCompanyId = dto.CompanyId;
+        var callerCompanyId = GetCallerCompanyId(req);
+
+        if (isAdmin && !isSuperAdmin && callerCompanyId.HasValue)
         {
             // Company Admin can only add users to their own company
             targetCompanyId = callerCompanyId;
         }
-        else if (!req.HttpContext.User.Identity?.IsAuthenticated ?? true)
-        {
-            // Anonymous self-registration — CompanyId required
-            if (!targetCompanyId.HasValue)
-                return new BadRequestObjectResult(new { error = "CompanyId is required for self-registration." });
-        }
 
         // Role enforcement:
-        // - Only SuperAdmin can assign SuperAdmin or Admin roles
+        // - SuperAdmin can assign any role
         // - Company Admin can only assign Logistics or Driver
         var role = dto.Role ?? Roles.Driver;
         if (!Roles.All.Contains(role, StringComparer.OrdinalIgnoreCase))
             role = Roles.Driver;
 
-        if (req.HttpContext.User.IsInRole(Roles.SuperAdmin))
+        if (isAdmin && !isSuperAdmin &&
+            !Roles.AdminAssignableRoles.Contains(role, StringComparer.OrdinalIgnoreCase))
         {
-            // SuperAdmin can assign any role
-        }
-        else if (req.HttpContext.User.IsInRole(Roles.Admin))
-        {
-            // Company Admin can only assign Logistics or Driver
-            if (!Roles.AdminAssignableRoles.Contains(role, StringComparer.OrdinalIgnoreCase))
-                return new BadRequestObjectResult(new { error = "Company administrators can only assign Logistics or Driver roles." });
-        }
-        else
-        {
-            // Anonymous / other roles default to Driver
-            role = Roles.Driver;
+            return new BadRequestObjectResult(new { error = "Company administrators can only assign Logistics or Driver roles." });
         }
 
         var user = new ApplicationUser

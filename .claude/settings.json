@@ -5,7 +5,12 @@
       "Bash(npm run *)",
       "Bash(Get-Process -Name \"pwsh\",\"func\",\"node\" -ErrorAction SilentlyContinue)",
       "Bash(Select-Object -First 10)",
-      "Bash(powershell -Command \"Get-Process -Name pwsh,func,node -ErrorAction SilentlyContinue | Format-Table Id,ProcessName,MainWindowTitle -AutoSize\")"
+      "Bash(powershell -Command \"Get-Process -Name pwsh,func,node -ErrorAction SilentlyContinue | Format-Table Id,ProcessName,MainWindowTitle -AutoSize\")",
+      "Bash(powershell -Command '& { $conn = New-Object System.Data.SqlClient.SqlConnection '\\\\''Server=localhost;Database=AtheresAtlas;User Id=sa;Password=Richard!18641949!Strauss;TrustServerCertificate=True;'\\\\''; $conn.Open\\(\\); foreach \\($table in '\\\\''Companies'\\\\'','\\\\''Stores'\\\\'','\\\\''Warehouses'\\\\'','\\\\''Hubs'\\\\'','\\\\''Trucks'\\\\''\\) { $cmd = $conn.CreateCommand\\(\\); $cmd.CommandText = \"SELECT COUNT\\(*\\) FROM $table\"; try { $c = $cmd.ExecuteScalar\\(\\); Write-Host \"$table : $c\" } catch { Write-Host \"$table : ERROR\" } }; $conn.Close\\(\\) }')",
+      "Bash(curl -s -X POST http://localhost:7071/api/orders -H 'Content-Type: application/json' -d '{\"companySlug\":\"secure-transport\",\"warehouseLicenseNumber\":\"CG00000019\",\"storeLicenseNumber\":\"284000351\",\"orderDate\":\"2026-04-21T00:00:00\",\"items\":[{\"sku\":\"TEST-1\",\"name\":\"Test Product\",\"quantity\":1}]}')",
+      "Bash(curl -s -X POST http://localhost:7071/api/orders -H 'Content-Type: application/json' -d '{\"companySlug\":\"00000000-0000-0000-0000-000000000001\",\"warehouseLicenseNumber\":\"CG00000019\",\"storeLicenseNumber\":\"284000351\",\"orderDate\":\"2026-04-21T00:00:00\",\"items\":[{\"sku\":\"TEST-1\",\"name\":\"Test\",\"quantity\":1}]}' -w '\\\\nHTTP: %{http_code}\\\\n')",
+      "Bash(curl -s -v -X POST http://localhost:7071/api/orders -H 'Content-Type: application/json' -d '{\"companySlug\":\"00000000-0000-0000-0000-000000000001\",\"warehouseLicenseNumber\":\"CG00000019\",\"storeLicenseNumber\":\"284000351\",\"orderDate\":\"2026-04-21T00:00:00\",\"items\":[{\"sku\":\"TEST-1\",\"name\":\"Test\",\"quantity\":1}]}')",
+      "Bash(curl -s http://localhost:7071/api/stores)"
     ]
   }
 }

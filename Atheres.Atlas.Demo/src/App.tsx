@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { getCompanies, getWarehouses, getStores, ingestOrder, resetAllOrders } from './api'
+import { getCompanies, getWarehouses, getStores, ingestOrder, markAllReady, resetAllOrders } from './api'
 import type { Warehouse, Store } from './api'
 import { format, addDays, subDays } from 'date-fns'
 
@@ -85,6 +85,21 @@ export default function App() {
     finally { setBusy(false) }
   }
 
+  async function markReady() {
+    if (!company) return
+    setBusy(true); setMsg(''); setErr('')
+    try {
+      const result = await markAllReady(company, date)
+      if (result.totalOrders === 0) {
+        setMsg('No orders ready to pickup.')
+      } else {
+        setMsg(`Queued ${result.routesQueued} route${result.routesQueued === 1 ? '' : 's'} for ${result.totalOrders} orders.`)
+      }
+    } catch (e: any) {
+      setErr(e?.response?.data?.error ?? 'Mark-ready failed.')
+    } finally { setBusy(false) }
+  }
+
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
       {/* Header */}
@@ -143,6 +158,13 @@ export default function App() {
           className="w-full h-14 bg-brand-500 text-white text-base font-bold rounded-xl active:bg-brand-700 disabled:opacity-40 transition-colors">
           {busy ? 'Working...' : `Generate ${count} Order${count !== 1 ? 's' : ''}`}
         </button>
+
+        {/* Mark all ready to pickup — also kicks off routing */}
+        <button onClick={markReady} disabled={busy || !company}
+          className="w-full h-14 bg-emerald-600 text-white text-base font-bold rounded-xl active:bg-emerald-800 disabled:opacity-40 transition-colors">
+          {busy ? 'Working...' : 'Mark All Ready to Pickup'}
+        </button>
+        <p className="text-center text-[11px] text-gray-400 -mt-1">Flips every Ordered order for this date to Scheduled and generates routes.</p>
 
         {/* Feedback */}
         {msg && <p className="text-center text-sm font-medium text-green-600">{msg}</p>}

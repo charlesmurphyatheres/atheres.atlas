@@ -2,6 +2,7 @@ using System.Text;
 using Atheres.Atlas.Data;
 using Atheres.Atlas.Data.Repositories;
 using Atheres.Atlas.Data.Services;
+using Atheres.Atlas.Functions.Middleware;
 using Atheres.Atlas.Functions.Services;
 using Azure.Messaging.ServiceBus;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -13,7 +14,10 @@ using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 
 var host = new HostBuilder()
-    .ConfigureFunctionsWebApplication()
+    .ConfigureFunctionsWebApplication(builder =>
+    {
+        builder.UseMiddleware<JwtAuthMiddleware>();
+    })
     .ConfigureServices((context, services) =>
     {
         var config = context.Configuration;
@@ -63,6 +67,10 @@ var host = new HostBuilder()
         services.AddScoped<IConfirmationRepository, ConfirmationRepository>();
         services.AddScoped<IAuditRepository, AuditRepository>();
         services.AddScoped<IUserSettingsRepository, UserSettingsRepository>();
+
+        // Registered so QueryAgent can invoke OptimizeRoute in-process when
+        // DirectOptimizer=true (dev fallback for when Service Bus is unreachable).
+        services.AddScoped<Atheres.Atlas.Functions.Agents.RouteOptimizationAgent>();
 
         // ---- Azure Service Bus ---------------------------------------------
         var serviceBusConnection = Environment.GetEnvironmentVariable("ServiceBusConnection")

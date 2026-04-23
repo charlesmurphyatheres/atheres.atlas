@@ -100,14 +100,6 @@ export interface Notification {
 
 export interface UserRouteSettings {
   userId: string
-  startAddress: string
-  startCity: string
-  startState: string
-  startZip: string
-  endAddress: string
-  endCity: string
-  endState: string
-  endZip: string
   deliveryWindowStart: string
   deliveryWindowEnd: string
   confirmationDeadlineHours: number
@@ -218,6 +210,10 @@ export interface Truck {
   licensePlate?: string
   hubId?: string
   hubName?: string
+  currentLocationAddress?: string | null
+  currentLocationLatitude?: number | null
+  currentLocationLongitude?: number | null
+  currentLocationUpdatedAt?: string | null
   assignedDriverId?: string
   isActive: boolean
 }

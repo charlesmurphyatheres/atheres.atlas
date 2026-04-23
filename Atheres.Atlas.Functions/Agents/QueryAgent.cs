@@ -1,5 +1,6 @@
 using Atheres.Atlas.Data;
 using Atheres.Atlas.Data.Repositories;
+using Atheres.Atlas.Data.Services;
 using Atheres.Atlas.Domain.Enums;
 using Atheres.Atlas.Domain.Messages;
 using Atheres.Atlas.Functions.Services;
@@ -24,6 +25,8 @@ public class QueryAgent
     private readonly IUserSettingsRepository _settings;
     private readonly IServiceBusPublisher _bus;
     private readonly AtlasDbContext _db;
+    private readonly ICompanyContext _companyContext;
+    private readonly RouteOptimizationAgent _optimizer;
     private readonly ILogger<QueryAgent> _logger;
 
     public QueryAgent(
@@ -32,6 +35,8 @@ public class QueryAgent
         IUserSettingsRepository settings,
         IServiceBusPublisher bus,
         AtlasDbContext db,
+        ICompanyContext companyContext,
+        RouteOptimizationAgent optimizer,
         ILogger<QueryAgent> logger)
     {
         _orders = orders;
@@ -39,6 +44,8 @@ public class QueryAgent
         _settings = settings;
         _bus = bus;
         _db = db;
+        _companyContext = companyContext;
+        _optimizer = optimizer;
         _logger = logger;
     }
 
@@ -245,6 +252,7 @@ public class QueryAgent
     // GET /api/stores
     // -----------------------------------------------------------------------
     [Function("query-stores-list")]
+    [AllowAnonymous]
     public async Task<IActionResult> ListStores(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "stores")]
         HttpRequest req, CancellationToken ct)
@@ -316,13 +324,18 @@ public class QueryAgent
     }
 
     // -----------------------------------------------------------------------
-    // POST /api/routes/optimize  (Admin / Scheduler)
-    // Body: { "deliveryDate": "yyyy-MM-dd", "orderIds": [...] }
+    // POST /api/orders/mark-all-ready
+    // Called by the order simulator. Marking orders as ready-to-pickup is also
+    // the trigger that kicks off routing — publishes optimization messages
+    // inline so there's no separate "run optimization" step.
+    //
+    // Body: { "companySlug": "<slug-or-guid>", "deliveryDate"?: "yyyy-MM-dd" }
+    // Anonymous on purpose: the demo app runs without auth.
     // -----------------------------------------------------------------------
-    [Function("query-routes-optimize")]
-    [Authorize(Roles = "Admin,SuperAdmin,Logistics")]
-    public async Task<IActionResult> TriggerOptimization(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "routes/optimize")]
+    [Function("orders-mark-all-ready")]
+    [AllowAnonymous]
+    public async Task<IActionResult> MarkAllReady(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "orders/mark-all-ready")]
         HttpRequest req,
         CancellationToken ct)
     {
@@ -330,59 +343,115 @@ public class QueryAgent
         try { doc = await System.Text.Json.JsonDocument.ParseAsync(req.Body, cancellationToken: ct); }
         catch { return new BadRequestObjectResult(new { error = "Invalid JSON." }); }
 
-        if (!doc.RootElement.TryGetProperty("deliveryDate", out var dateEl) ||
-            !DateTime.TryParse(dateEl.GetString(), out var deliveryDate))
-            return new BadRequestObjectResult(new { error = "deliveryDate required." });
+        var companyKey = doc.RootElement.TryGetProperty("companySlug", out var csEl) ? csEl.GetString() : null;
+        if (string.IsNullOrWhiteSpace(companyKey))
+            return new BadRequestObjectResult(new { error = "companySlug is required." });
 
-        var orderIds = new List<Guid>();
-        if (doc.RootElement.TryGetProperty("orderIds", out var arr))
+        // Accept either slug or company GUID
+        var company = await _db.Companies.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(c => (c.Slug == companyKey || c.Id.ToString() == companyKey) && c.IsActive, ct);
+        if (company is null)
+            return new NotFoundObjectResult(new { error = $"Company not found: {companyKey}" });
+
+        DateTime? deliveryDate = null;
+        if (doc.RootElement.TryGetProperty("deliveryDate", out var dateEl) &&
+            DateTime.TryParse(dateEl.GetString(), out var parsedDate))
+            deliveryDate = parsedDate.Date;
+
+        var query = _db.Orders.IgnoreQueryFilters()
+            .Where(o => o.CompanyId == company.Id
+                     && o.Status == OrderStatus.Ordered
+                     && o.Latitude != null
+                     && o.Longitude != null);
+        if (deliveryDate is not null)
+            query = query.Where(o => o.OrderDate.Date == deliveryDate.Value);
+
+        var orders = await query.ToListAsync(ct);
+        if (orders.Count == 0)
+            return new OkObjectResult(new { message = "No routable orders ready to pickup.", routesQueued = 0, totalOrders = 0 });
+
+        var firstHubId = await _db.Hubs.IgnoreQueryFilters()
+            .Where(h => h.CompanyId == company.Id && h.IsActive)
+            .Select(h => (Guid?)h.Id)
+            .FirstOrDefaultAsync(ct);
+        if (firstHubId is null)
+            return new BadRequestObjectResult(new { error = "No active hub configured for this company." });
+
+        // Group by warehouse so each route picks up from the right place. Orders
+        // without a warehouse land in a null group that has no pickup stop.
+        // Google Directions caps waypoints at 25 per request (one reserved for
+        // the warehouse pickup stop when present), so each warehouse group is
+        // further chunked into sub-groups that fit inside the limit.
+        const int MaxStopsPerRoute = 25;
+        var groups = orders.GroupBy(o => o.WarehouseId).ToList();
+
+        foreach (var order in orders)
+            order.Status = OrderStatus.Scheduled;
+        await _db.SaveChangesAsync(ct);
+
+        // In direct-optimize mode the optimizer will re-load and mutate these
+        // same orders. Release them from the ChangeTracker now so the optimizer
+        // starts with a clean slate and doesn't collide with stale tracking.
+        _db.ChangeTracker.Clear();
+
+        var groupDate = deliveryDate ?? DateTime.UtcNow.Date;
+        var directOptimize = string.Equals(
+            Environment.GetEnvironmentVariable("DirectOptimizer"), "true",
+            StringComparison.OrdinalIgnoreCase);
+
+        var messages = new List<RouteOptimizationRequestMessage>();
+        foreach (var group in groups)
         {
-            foreach (var el in arr.EnumerateArray())
-                if (Guid.TryParse(el.GetString(), out var g)) orderIds.Add(g);
+            var pickupSlot = group.Key.HasValue ? 1 : 0;
+            var chunkSize = MaxStopsPerRoute - pickupSlot;
+            var orderedIds = group.Select(o => o.Id).ToList();
+            for (int i = 0; i < orderedIds.Count; i += chunkSize)
+            {
+                var chunk = orderedIds.Skip(i).Take(chunkSize).ToList();
+                messages.Add(new RouteOptimizationRequestMessage(
+                    Guid.NewGuid(),
+                    company.Id,
+                    null,
+                    firstHubId.Value,
+                    group.Key,
+                    groupDate,
+                    chunk,
+                    DateTime.UtcNow));
+            }
         }
 
-        // If no specific orderIds, collect all Validated orders for that date
-        if (orderIds.Count == 0)
+        try
         {
-            orderIds = await _db.Orders
-                .Where(o => o.Status == OrderStatus.Ordered && o.OrderDate.Date == deliveryDate.Date)
-                .Select(o => o.Id)
-                .ToListAsync(ct);
+            if (directOptimize)
+            {
+                // Dev fallback: optimizer runs in-process so a broken Service Bus
+                // (port 5672 colliding with native RabbitMQ, etc.) doesn't prevent
+                // routes from being written. Prod should leave this unset so the
+                // real queue does the work asynchronously.
+                foreach (var message in messages)
+                    await _optimizer.OptimizeRoute(message, ct);
+            }
+            else
+            {
+                foreach (var message in messages)
+                    await _bus.PublishAsync(ServiceBusQueues.RoutesOptimize, message, ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "mark-all-ready: optimizer invocation failed");
+            return new ObjectResult(new { error = $"Failed to queue optimization: {ex.Message}" }) { StatusCode = 500 };
         }
 
-        if (orderIds.Count == 0)
-            return new OkObjectResult(new { message = "No validated orders found for that date.", count = 0 });
+        _logger.LogInformation("mark-all-ready: {Company} queued {Routes} route(s) for {Orders} orders",
+            company.Slug, groups.Count, orders.Count);
 
-        var firstOrder = await _db.Orders.FirstOrDefaultAsync(o => orderIds.Contains(o.Id), ct);
-        if (firstOrder is null)
-            return new NotFoundObjectResult(new { error = "Orders not found." });
-
-        // HubId is required — the route starts and ends at a hub
-        if (!doc.RootElement.TryGetProperty("hubId", out var hubEl) ||
-            !Guid.TryParse(hubEl.GetString(), out var hubId))
-            return new BadRequestObjectResult(new { error = "hubId is required." });
-
-        // Optional warehouseId for pickup stop
-        Guid? warehouseId = null;
-        if (doc.RootElement.TryGetProperty("warehouseId", out var whEl) &&
-            Guid.TryParse(whEl.GetString(), out var whId))
-            warehouseId = whId;
-
-        var message = new RouteOptimizationRequestMessage(
-            Guid.NewGuid(),
-            firstOrder.CompanyId,
-            null,
-            hubId,
-            warehouseId,
-            deliveryDate,
-            orderIds,
-            DateTime.UtcNow);
-
-        await _bus.PublishAsync(ServiceBusQueues.RoutesOptimize, message, ct);
-
-        _logger.LogInformation("Route optimization triggered for {Date} with {Count} orders", deliveryDate.Date, orderIds.Count);
-
-        return new OkObjectResult(new { message = "Optimization queued.", orderCount = orderIds.Count });
+        return new OkObjectResult(new
+        {
+            message = "Orders marked ready to pickup. Routing in progress.",
+            routesQueued = messages.Count,
+            totalOrders = orders.Count,
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -401,8 +470,6 @@ public class QueryAgent
             return new OkObjectResult(new
             {
                 userId,
-                startAddress = "", startCity = "", startState = "", startZip = "",
-                endAddress   = "", endCity   = "", endState   = "", endZip   = "",
                 deliveryWindowStart = "08:00:00",
                 deliveryWindowEnd   = "17:00:00",
                 confirmationDeadlineHours = 3,
@@ -412,8 +479,6 @@ public class QueryAgent
         return new OkObjectResult(new
         {
             userId = s.UserId,
-            s.StartAddress, s.StartCity, s.StartState, s.StartZip,
-            s.EndAddress,   s.EndCity,   s.EndState,   s.EndZip,
             deliveryWindowStart = s.DeliveryWindowStart.ToString(@"hh\:mm\:ss"),
             deliveryWindowEnd   = s.DeliveryWindowEnd.ToString(@"hh\:mm\:ss"),
             s.ConfirmationDeadlineHours,
@@ -435,22 +500,17 @@ public class QueryAgent
         try { doc = await System.Text.Json.JsonDocument.ParseAsync(req.Body, cancellationToken: ct); }
         catch { return new BadRequestObjectResult(new { error = "Invalid JSON." }); }
 
+        var companyId = _companyContext.CompanyId;
+        if (!companyId.HasValue)
+            return new BadRequestObjectResult(new { error = "Select a company before saving settings." });
+
         var existing = await _settings.GetByUserIdAsync(userId, ct)
-            ?? new Domain.Entities.UserRouteSettings { UserId = userId };
+            ?? new Domain.Entities.UserRouteSettings { UserId = userId, CompanyId = companyId.Value };
 
         string? Str(string key) =>
             doc.RootElement.TryGetProperty(key, out var v) ? v.GetString() : null;
         int? Int(string key) =>
             doc.RootElement.TryGetProperty(key, out var v) && v.TryGetInt32(out var i) ? i : null;
-
-        existing.StartAddress = Str("startAddress") ?? existing.StartAddress;
-        existing.StartCity    = Str("startCity")    ?? existing.StartCity;
-        existing.StartState   = Str("startState")   ?? existing.StartState;
-        existing.StartZip     = Str("startZip")     ?? existing.StartZip;
-        existing.EndAddress   = Str("endAddress")   ?? existing.EndAddress;
-        existing.EndCity      = Str("endCity")      ?? existing.EndCity;
-        existing.EndState     = Str("endState")     ?? existing.EndState;
-        existing.EndZip       = Str("endZip")       ?? existing.EndZip;
 
         if (Str("deliveryWindowStart") is { } ws && TimeSpan.TryParse(ws, out var wsts))
             existing.DeliveryWindowStart = wsts;

@@ -24,27 +24,38 @@ public class OrderIngestionAgent
     private readonly IOrderRepository _orders;
     private readonly IServiceBusPublisher _bus;
     private readonly AtlasDbContext _db;
+    private readonly IGoogleMapsService _maps;
     private readonly ILogger<OrderIngestionAgent> _logger;
 
     public OrderIngestionAgent(
         IOrderRepository orders,
         IServiceBusPublisher bus,
         AtlasDbContext db,
+        IGoogleMapsService maps,
         ILogger<OrderIngestionAgent> logger)
     {
         _orders = orders;
         _bus    = bus;
         _db     = db;
+        _maps   = maps;
         _logger = logger;
     }
 
     /// <summary>
     /// Public endpoint: accepts a JSON array of orders identified by license numbers.
     /// POST /api/orders
+    ///
+    /// AuthorizationLevel.Anonymous because the demo simulator (served from a
+    /// different origin, with no auth token plumbed in) posts to this endpoint.
+    /// The request body carries CompanySlug explicitly, so there's no need for
+    /// a caller identity at the Functions-host layer. If we later want to gate
+    /// this behind a JWT, add a Bearer-token check inside the handler rather
+    /// than switching back to Function-level auth (which would require shipping
+    /// a function key to a public-facing SPA).
     /// </summary>
     [Function(nameof(IngestOrders))]
     public async Task<HttpResponseData> IngestOrders(
-        [HttpTrigger(AuthorizationLevel.Function, "post", Route = "orders")] HttpRequestData req,
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "orders")] HttpRequestData req,
         CancellationToken ct)
     {
         OrderInputDto? dto;
@@ -106,6 +117,26 @@ public class OrderIngestionAgent
             var noItems = req.CreateResponse(HttpStatusCode.BadRequest);
             await noItems.WriteAsJsonAsync(new { error = "Order must have at least one item." }, ct);
             return noItems;
+        }
+
+        // Self-heal: if this store has never been geocoded, do it once and persist
+        // to the Store row. Stops orders from being silently unroutable when
+        // imports skip lat/lng.
+        if (store.Latitude is null || store.Longitude is null)
+        {
+            var geo = await _maps.GeocodeAsync(store.FullAddress, ct);
+            if (geo is not null)
+            {
+                store.Latitude         = geo.Latitude;
+                store.Longitude        = geo.Longitude;
+                store.FormattedAddress = geo.FormattedAddress;
+                store.UpdatedAt        = DateTime.UtcNow;
+            }
+            else
+            {
+                _logger.LogWarning("Could not geocode store {Store} ({License}); order will be unroutable.",
+                    store.Name, store.LicenseNumber);
+            }
         }
 
         // Upsert products
@@ -171,11 +202,21 @@ public class OrderIngestionAgent
         await _orders.AddAsync(order, ct);
         await _orders.SaveChangesAsync(ct);
 
-        await _bus.PublishAsync(ServiceBusQueues.Notifications, new NotificationMessage(
-            Guid.NewGuid(), company.Id, NotificationType.OrderReceived,
-            "Order Received",
-            $"Order with {order.Items.Count} items for {order.StoreName}.",
-            order.Id, null, null, null, DateTime.UtcNow), ct);
+        // The broadcast notification is cosmetic — a SignalR "Order Received"
+        // toast for whoever's watching the main app. Don't let a Service Bus
+        // outage fail the ingest; the order is already persisted.
+        try
+        {
+            await _bus.PublishAsync(ServiceBusQueues.Notifications, new NotificationMessage(
+                Guid.NewGuid(), company.Id, NotificationType.OrderReceived,
+                "Order Received",
+                $"Order with {order.Items.Count} items for {order.StoreName}.",
+                order.Id, null, null, null, DateTime.UtcNow), ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Order {OrderId} saved but notification publish failed (queue unavailable)", order.Id);
+        }
 
         _logger.LogInformation("Ingested order {OrderId} with {ItemCount} items", order.Id, order.Items.Count);
 

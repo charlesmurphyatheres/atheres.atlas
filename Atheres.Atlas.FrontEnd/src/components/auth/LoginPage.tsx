@@ -27,15 +27,15 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50">
       <div className="w-full max-w-sm">
-        <div className="flex justify-center mb-8">
-          <div className="w-12 h-12 bg-brand-500 rounded-xl flex items-center justify-center">
-            <span className="text-white font-bold text-xl">A</span>
-          </div>
-        </div>
+        <img
+          src="/images/atlas_logo.jpg"
+          alt="Atlas Deliver"
+          className="w-full h-auto rounded-2xl mb-6 shadow-sm"
+        />
 
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-8">
           <h1 className="text-2xl font-bold text-gray-900 mb-1">Sign in</h1>
-          <p className="text-sm text-gray-500 mb-6">Atheres Atlas Delivery Platform</p>
+          <p className="text-sm text-gray-500 mb-6">Atlas Deliver</p>
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>

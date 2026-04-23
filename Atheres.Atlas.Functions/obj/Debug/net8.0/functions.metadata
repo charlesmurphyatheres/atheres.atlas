@@ -1,5 +1,32 @@
 [
   {
+    "name": "maintenance-geocode-stores",
+    "scriptFile": "Atheres.Atlas.Functions.dll",
+    "entryPoint": "Atheres.Atlas.Functions.Agents.AdminAgent.GeocodeStores",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "req",
+        "direction": "In",
+        "type": "httpTrigger",
+        "authLevel": "Anonymous",
+        "methods": [
+          "post"
+        ],
+        "route": "maintenance/geocode-stores",
+        "properties": {}
+      },
+      {
+        "name": "$return",
+        "type": "http",
+        "direction": "Out"
+      }
+    ]
+  },
+  {
     "name": "batches-list",
     "scriptFile": "Atheres.Atlas.Functions.dll",
     "entryPoint": "Atheres.Atlas.Functions.Agents.BatchAgent.List",
@@ -794,9 +821,9 @@
     ]
   },
   {
-    "name": "query-routes-optimize",
+    "name": "orders-mark-all-ready",
     "scriptFile": "Atheres.Atlas.Functions.dll",
-    "entryPoint": "Atheres.Atlas.Functions.Agents.QueryAgent.TriggerOptimization",
+    "entryPoint": "Atheres.Atlas.Functions.Agents.QueryAgent.MarkAllReady",
     "language": "dotnet-isolated",
     "properties": {
       "IsCodeless": false
@@ -810,7 +837,7 @@
         "methods": [
           "post"
         ],
-        "route": "routes/optimize",
+        "route": "orders/mark-all-ready",
         "properties": {}
       },
       {

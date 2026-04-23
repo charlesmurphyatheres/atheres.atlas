@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { getUsers, registerUser, deactivateUser, getOrders, updateOrderStatus, getRoutes, getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse, getHubs, createHub, updateHub, deleteHub, getTrucks, createTruck, updateTruck, deleteTruck } from '../../services/apiService'
+import { useSortedRows } from '../../hooks/useSortedRows'
+import { SortHeader } from '../ui/SortHeader'
 import type { AppUser, Order, Route, Role, Warehouse, Hub, Truck } from '../../types'
 import { format } from 'date-fns'
 import { useAuth } from '../../contexts/AuthContext'
@@ -51,6 +53,12 @@ function OrdersTab() {
   const [orders, setOrders] = useState<Order[]>([])
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState('')
+  const { sorted: sortedOrders, sortKey, sortDir, toggle } = useSortedRows(orders, {
+    accessors: {
+      address:      (o) => `${o.address ?? ''}, ${o.city ?? ''}`,
+      districtZone: (o) => `${o.district ?? ''} / ${o.zone ?? ''}`,
+    },
+  })
 
   useEffect(() => {
     load()
@@ -95,13 +103,17 @@ function OrdersTab() {
             <table className="w-full text-sm">
               <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
                 <tr>
-                  {['Store', 'Address', 'District/Zone', 'Order Date', 'Expected', 'Status', 'Actions'].map((h) => (
-                    <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
-                  ))}
+                  <SortHeader label="Store"         sortKey="storeName"            activeKey={sortKey} dir={sortDir} onClick={() => toggle('storeName')} />
+                  <SortHeader label="Address"       sortKey="address"              activeKey={sortKey} dir={sortDir} onClick={() => toggle('address')} />
+                  <SortHeader label="District/Zone" sortKey="districtZone"         activeKey={sortKey} dir={sortDir} onClick={() => toggle('districtZone')} />
+                  <SortHeader label="Order Date"    sortKey="orderDate"            activeKey={sortKey} dir={sortDir} onClick={() => toggle('orderDate')} />
+                  <SortHeader label="Expected"      sortKey="expectedDeliveryDate" activeKey={sortKey} dir={sortDir} onClick={() => toggle('expectedDeliveryDate')} />
+                  <SortHeader label="Status"        sortKey="status"               activeKey={sortKey} dir={sortDir} onClick={() => toggle('status')} />
+                  <th className="px-4 py-3 text-left font-medium">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {orders.map((o) => (
+                {sortedOrders.map((o) => (
                   <tr key={o.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium text-gray-900">{o.storeName}</td>
                     <td className="px-4 py-3 text-gray-600">{o.address}, {o.city}</td>
@@ -127,7 +139,7 @@ function OrdersTab() {
                     </td>
                   </tr>
                 ))}
-                {orders.length === 0 && (
+                {sortedOrders.length === 0 && (
                   <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-400">No orders found.</td></tr>
                 )}
               </tbody>
@@ -220,6 +232,12 @@ function UsersTab() {
   const [form, setForm] = useState({ email: '', password: '', firstName: '', lastName: '', role: 'Driver' as Role })
   const [formError, setFormError] = useState('')
   const [creating, setCreating] = useState(false)
+  const { sorted: sortedUsers, sortKey, sortDir, toggle } = useSortedRows(users, {
+    accessors: {
+      roles:    (u) => u.roles.join(', '),
+      isActive: (u) => u.isActive,
+    },
+  })
 
   useEffect(() => {
     getUsers().then(setUsers).finally(() => setLoading(false))
@@ -319,13 +337,16 @@ function UsersTab() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
               <tr>
-                {['Name', 'Email', 'Roles', 'Last Login', 'Status', ''].map((h) => (
-                  <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
-                ))}
+                <SortHeader label="Name"       sortKey="fullName"    activeKey={sortKey} dir={sortDir} onClick={() => toggle('fullName')} />
+                <SortHeader label="Email"      sortKey="email"       activeKey={sortKey} dir={sortDir} onClick={() => toggle('email')} />
+                <SortHeader label="Roles"      sortKey="roles"       activeKey={sortKey} dir={sortDir} onClick={() => toggle('roles')} />
+                <SortHeader label="Last Login" sortKey="lastLoginAt" activeKey={sortKey} dir={sortDir} onClick={() => toggle('lastLoginAt')} />
+                <SortHeader label="Status"     sortKey="isActive"    activeKey={sortKey} dir={sortDir} onClick={() => toggle('isActive')} />
+                <th className="px-4 py-3 text-left font-medium"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {users.map((u) => (
+              {sortedUsers.map((u) => (
                 <tr key={u.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3 font-medium text-gray-900">{u.fullName}</td>
                   <td className="px-4 py-3 text-gray-600">{u.email}</td>
@@ -352,7 +373,7 @@ function UsersTab() {
                   </td>
                 </tr>
               ))}
-              {users.length === 0 && (
+              {sortedUsers.length === 0 && (
                 <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-400">No users found.</td></tr>
               )}
             </tbody>
@@ -372,6 +393,9 @@ function HubsTab() {
   const [form, setForm] = useState({ name: '', address: '', city: '', state: '', zip: '' })
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
+  const { sorted: sortedHubs, sortKey, sortDir, toggle } = useSortedRows(hubs, {
+    accessors: { address: (h) => `${h.address}, ${h.city}, ${h.state} ${h.zip}` },
+  })
 
   useEffect(() => {
     getHubs().then(setHubs).finally(() => setLoading(false))
@@ -452,13 +476,13 @@ function HubsTab() {
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
             <tr>
-              {['Name', 'Address', ''].map((h) => (
-                <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
-              ))}
+              <SortHeader label="Name"    sortKey="name"    activeKey={sortKey} dir={sortDir} onClick={() => toggle('name')} />
+              <SortHeader label="Address" sortKey="address" activeKey={sortKey} dir={sortDir} onClick={() => toggle('address')} />
+              <th className="px-4 py-3 text-left font-medium"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {hubs.map((h) => (
+            {sortedHubs.map((h) => (
               <tr key={h.id} className="hover:bg-gray-50">
                 <td className="px-4 py-3 font-medium text-gray-900">{h.name}</td>
                 <td className="px-4 py-3 text-gray-600">{h.address}, {h.city} {h.state} {h.zip}</td>
@@ -470,7 +494,7 @@ function HubsTab() {
                 </td>
               </tr>
             ))}
-            {hubs.length === 0 && (
+            {sortedHubs.length === 0 && (
               <tr><td colSpan={3} className="px-4 py-8 text-center text-gray-400">No hubs found.</td></tr>
             )}
           </tbody>
@@ -487,9 +511,10 @@ function VansTab() {
   const [hubs, setHubs] = useState<Hub[]>([])
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<string | 'new' | null>(null)
-  const [form, setForm] = useState({ name: '', licensePlate: '', hubId: '' })
+  const [form, setForm] = useState({ name: '', licensePlate: '', hubId: '', currentLocationAddress: '' })
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
+  const { sorted: sortedTrucks, sortKey, sortDir, toggle } = useSortedRows(trucks)
 
   useEffect(() => {
     Promise.all([getTrucks(), getHubs()])
@@ -498,13 +523,18 @@ function VansTab() {
   }, [])
 
   function startCreate() {
-    setForm({ name: '', licensePlate: '', hubId: hubs[0]?.id ?? '' })
+    setForm({ name: '', licensePlate: '', hubId: hubs[0]?.id ?? '', currentLocationAddress: '' })
     setEditing('new')
     setFormError('')
   }
 
   function startEdit(t: Truck) {
-    setForm({ name: t.name, licensePlate: t.licensePlate ?? '', hubId: t.hubId ?? '' })
+    setForm({
+      name: t.name,
+      licensePlate: t.licensePlate ?? '',
+      hubId: t.hubId ?? '',
+      currentLocationAddress: t.currentLocationAddress ?? '',
+    })
     setEditing(t.id)
     setFormError('')
   }
@@ -513,10 +543,17 @@ function VansTab() {
     if (!form.name) { setFormError('Name is required.'); return }
     setSaving(true); setFormError('')
     try {
+      const payload = {
+        name: form.name,
+        licensePlate: form.licensePlate || undefined,
+        hubId: form.hubId || undefined,
+        // Empty string clears the location server-side; undefined leaves it untouched.
+        currentLocationAddress: form.currentLocationAddress,
+      }
       if (editing === 'new') {
-        await createTruck({ name: form.name, licensePlate: form.licensePlate || undefined, hubId: form.hubId || undefined })
+        await createTruck(payload)
       } else {
-        await updateTruck(editing!, { name: form.name, licensePlate: form.licensePlate || undefined, hubId: form.hubId || undefined })
+        await updateTruck(editing!, payload)
       }
       setTrucks(await getTrucks())
       setEditing(null)
@@ -556,6 +593,17 @@ function VansTab() {
               </select>
             </div>
           </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Current Location</label>
+            <input
+              type="text"
+              value={form.currentLocationAddress}
+              onChange={(e) => setForm({ ...form, currentLocationAddress: e.target.value })}
+              placeholder="e.g. 1700 N Clark St, Chicago, IL 60614 — leave blank to clear"
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400"
+            />
+            <p className="text-[11px] text-gray-400 mt-1">Address is auto-geocoded on save. Separate from Home Hub — use for "where the van actually is right now."</p>
+          </div>
           {formError && <p className="text-sm text-red-600">{formError}</p>}
           <div className="flex gap-2">
             <button onClick={handleSave} disabled={saving}
@@ -572,13 +620,15 @@ function VansTab() {
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
             <tr>
-              {['Vehicle', 'License Plate', 'Hub', ''].map((h) => (
-                <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
-              ))}
+              <SortHeader label="Vehicle"          sortKey="name"                   activeKey={sortKey} dir={sortDir} onClick={() => toggle('name')} />
+              <SortHeader label="License Plate"    sortKey="licensePlate"           activeKey={sortKey} dir={sortDir} onClick={() => toggle('licensePlate')} />
+              <SortHeader label="Hub"              sortKey="hubName"                activeKey={sortKey} dir={sortDir} onClick={() => toggle('hubName')} />
+              <SortHeader label="Current Location" sortKey="currentLocationAddress" activeKey={sortKey} dir={sortDir} onClick={() => toggle('currentLocationAddress')} />
+              <th className="px-4 py-3 text-left font-medium"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {trucks.map((t) => (
+            {sortedTrucks.map((t) => (
               <tr key={t.id} className="hover:bg-gray-50">
                 <td className="px-4 py-3 font-medium text-gray-900">{t.name}</td>
                 <td className="px-4 py-3 text-gray-600">{t.licensePlate ?? '---'}</td>
@@ -588,6 +638,11 @@ function VansTab() {
                     : <span className="text-xs text-gray-400">Unassigned</span>}
                 </td>
                 <td className="px-4 py-3">
+                  {t.currentLocationAddress
+                    ? <span className="text-xs text-gray-700">{t.currentLocationAddress}</span>
+                    : <span className="text-xs text-gray-400">—</span>}
+                </td>
+                <td className="px-4 py-3">
                   <div className="flex gap-2">
                     <button onClick={() => startEdit(t)} className="text-xs text-brand-600 hover:text-brand-800">Edit</button>
                     <button onClick={() => handleDeactivate(t.id)} className="text-xs text-red-500 hover:text-red-700">Deactivate</button>
@@ -595,8 +650,8 @@ function VansTab() {
                 </td>
               </tr>
             ))}
-            {trucks.length === 0 && (
-              <tr><td colSpan={4} className="px-4 py-8 text-center text-gray-400">No vans found.</td></tr>
+            {sortedTrucks.length === 0 && (
+              <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-400">No vans found.</td></tr>
             )}
           </tbody>
         </table>
@@ -642,6 +697,15 @@ function WarehousesTab() {
   const [form, setForm] = useState<WarehouseForm>(emptyWarehouseForm)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
+  const { sorted: sortedWarehouses, sortKey, sortDir, toggle } = useSortedRows(warehouses, {
+    accessors: {
+      address:        (w) => `${w.address}, ${w.city}, ${w.state} ${w.zip}`,
+      pickupSchedule: (w) => [
+        w.mondayPickupTime, w.tuesdayPickupTime, w.wednesdayPickupTime, w.thursdayPickupTime,
+        w.fridayPickupTime, w.saturdayPickupTime, w.sundayPickupTime,
+      ].filter(Boolean).length,
+    },
+  })
 
   useEffect(() => {
     getWarehouses().then(setWarehouses).finally(() => setLoading(false))
@@ -783,13 +847,15 @@ function WarehousesTab() {
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
             <tr>
-              {['Business Name', 'Address', 'License #', 'Pickup Schedule', ''].map((h) => (
-                <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
-              ))}
+              <SortHeader label="Business Name"   sortKey="businessName"   activeKey={sortKey} dir={sortDir} onClick={() => toggle('businessName')} />
+              <SortHeader label="Address"         sortKey="address"        activeKey={sortKey} dir={sortDir} onClick={() => toggle('address')} />
+              <SortHeader label="License #"       sortKey="licenseNumber"  activeKey={sortKey} dir={sortDir} onClick={() => toggle('licenseNumber')} />
+              <SortHeader label="Pickup Schedule" sortKey="pickupSchedule" activeKey={sortKey} dir={sortDir} onClick={() => toggle('pickupSchedule')} />
+              <th className="px-4 py-3 text-left font-medium"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {warehouses.map((w) => (
+            {sortedWarehouses.map((w) => (
               <tr key={w.id} className="hover:bg-gray-50">
                 <td className="px-4 py-3">
                   <p className="font-medium text-gray-900">{w.businessName}</p>
@@ -821,7 +887,7 @@ function WarehousesTab() {
                 </td>
               </tr>
             ))}
-            {warehouses.length === 0 && (
+            {sortedWarehouses.length === 0 && (
               <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-400">No warehouses found.</td></tr>
             )}
           </tbody>

@@ -53,22 +53,26 @@ public class RouteOptimizationAgent
         _logger.LogInformation("Optimizing route for {Count} orders on {Date:yyyy-MM-dd}",
             message.OrderIds.Count, message.DeliveryDate);
 
-        await _bus.PublishAsync(ServiceBusQueues.Audit, new AuditMessage(
+        await SafePublish(() => _bus.PublishAsync(ServiceBusQueues.Audit, new AuditMessage(
             AuditEventType.RouteOptimizationStarted, nameof(RouteOptimizationAgent),
             message.CompanyId, null, message.RouteRequestId,
             null, null,
             $"Optimizing {message.OrderIds.Count} stops for {message.DeliveryDate:yyyy-MM-dd}",
-            true, null, DateTime.UtcNow), ct);
+            true, null, DateTime.UtcNow), ct),
+            "start audit event");
 
         // Load hub (always the route origin and destination)
         var hub = await _db.Hubs.IgnoreQueryFilters()
             .FirstOrDefaultAsync(h => h.Id == message.HubId, ct)
             ?? throw new InvalidOperationException($"Hub {message.HubId} not found.");
 
-        // Load truck settings for delivery window and confirmation deadline
+        // Load truck settings for delivery window and confirmation deadline.
+        // If none are configured (routes now start/end at the hub, so the
+        // Settings UI only exposes window + deadline), fall back to the entity
+        // defaults — 08:00–17:00 delivery window, 3h confirmation deadline.
         var settingsKey = message.TruckId?.ToString() ?? "default";
         var userSettings = await _settings.GetByUserIdAsync(settingsKey, ct)
-                           ?? throw new InvalidOperationException($"No route settings found for truck '{settingsKey}'.");
+                           ?? new UserRouteSettings { UserId = settingsKey, CompanyId = message.CompanyId };
 
         // Load warehouse if specified (it becomes the first waypoint for pickup)
         Warehouse? warehouse = null;
@@ -119,11 +123,12 @@ public class RouteOptimizationAgent
         if (optimizedRoute is null)
         {
             _logger.LogError("Route optimization failed for {RouteRequestId}", message.RouteRequestId);
-            await _bus.PublishAsync(ServiceBusQueues.Audit, new AuditMessage(
+            await SafePublish(() => _bus.PublishAsync(ServiceBusQueues.Audit, new AuditMessage(
                 AuditEventType.RouteOptimizationFailed, nameof(RouteOptimizationAgent),
                 message.CompanyId, null, message.RouteRequestId,
                 null, null, "Google Maps API returned no route", false,
-                "No route returned", DateTime.UtcNow), ct);
+                "No route returned", DateTime.UtcNow), ct),
+                "failure audit event");
             return;
         }
 
@@ -199,6 +204,11 @@ public class RouteOptimizationAgent
                 LegDurationSeconds = leg?.DurationSeconds ?? 0
             };
             route.Stops.Add(stop);
+            // Force Added state — after the route itself is saved and becomes
+            // Unchanged, EF's collection-fixup can otherwise read the
+            // already-populated Guid on a freshly-constructed RouteStop as
+            // "this row exists" and emit a phantom UPDATE instead of INSERT.
+            _db.Entry(stop).State = EntityState.Added;
 
             // Update order
             order.RouteId = route.Id;
@@ -241,25 +251,49 @@ public class RouteOptimizationAgent
                 DateTime.UtcNow));
         }
 
-        await _routes.UpdateAsync(route, ct);
-        await _orders.SaveChangesAsync(ct);
-        await _routes.SaveChangesAsync(ct);
+        // The route was just inserted and is still tracked; the stops we added
+        // to route.Stops and the order mutations are flushed by the shared
+        // DbContext on SaveChanges. An explicit Update() here would mark the
+        // whole Route as Modified and issue a redundant UPDATE — which EF then
+        // blows up on as a phantom concurrency conflict when scoping rules
+        // tweak the WHERE clause.
+        await _db.SaveChangesAsync(ct);
 
-        // Publish all confirmation requests
-        await _bus.PublishBatchAsync(ServiceBusQueues.ConfirmationsSend, confirmationMessages, ct);
+        // In-process direct-invoke mode (dev fallback) calls this method once
+        // per warehouse group within the same scope. Release tracked entities
+        // so the next invocation starts with a clean ChangeTracker.
+        _db.ChangeTracker.Clear();
 
-        await _bus.PublishAsync(ServiceBusQueues.Audit, new AuditMessage(
+        // Downstream queue publishes (confirmation emails, audit, notification)
+        // are all best-effort: the route is persisted, so a Service Bus outage
+        // shouldn't roll the route write back. Each publish is wrapped so one
+        // broken queue doesn't prevent the others from being attempted.
+        await SafePublish(() => _bus.PublishBatchAsync(ServiceBusQueues.ConfirmationsSend, confirmationMessages, ct),
+            "confirmation requests");
+
+        await SafePublish(() => _bus.PublishAsync(ServiceBusQueues.Audit, new AuditMessage(
             AuditEventType.RouteOptimizationCompleted, nameof(RouteOptimizationAgent),
             message.CompanyId, null, route.Id, null, null,
-            $"Route with {route.TotalStops} stops, {route.TotalDistanceMiles:F1} miles", true, null, DateTime.UtcNow), ct);
+            $"Route with {route.TotalStops} stops, {route.TotalDistanceMiles:F1} miles", true, null, DateTime.UtcNow), ct),
+            "audit event");
 
-        await _bus.PublishAsync(ServiceBusQueues.Notifications, new NotificationMessage(
+        await SafePublish(() => _bus.PublishAsync(ServiceBusQueues.Notifications, new NotificationMessage(
             Guid.NewGuid(), message.CompanyId, NotificationType.RouteReady,
             "Route Optimized",
             $"Delivery route for {message.DeliveryDate:MMM dd} with {route.TotalStops} stops is ready.",
-            null, route.Id, null, null, DateTime.UtcNow), ct);
+            null, route.Id, null, null, DateTime.UtcNow), ct),
+            "route-ready notification");
 
         _logger.LogInformation("Route {RouteId} optimized: {Stops} stops, {Miles:F1} miles",
             route.Id, route.TotalStops, route.TotalDistanceMiles);
+    }
+
+    private async Task SafePublish(Func<Task> publish, string label)
+    {
+        try { await publish(); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Downstream {Label} publish failed (route still persisted).", label);
+        }
     }
 }

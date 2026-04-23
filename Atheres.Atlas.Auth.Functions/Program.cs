@@ -1,22 +1,55 @@
 using System.Text;
+using Atheres.Atlas.Auth.Functions.Middleware;
 using Atheres.Atlas.Auth.Functions.Services;
 using Atheres.Atlas.Data;
 using Atheres.Atlas.Data.Entities;
 using Atheres.Atlas.Data.Services;
 using Atheres.Atlas.Domain.Constants;
+using Atheres.Atlas.Domain.Entities;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 
+// Startup trace: writes to stdout/stderr so an `az webapp log tail` (or
+// App Insights traces) shows exactly which required app settings are missing
+// when the isolated worker fails to index functions. Without this, Azure
+// reports only "WarmUp" and there's no clue why.
+static void TraceConfigPresence(IConfiguration config)
+{
+    string[] required =
+    {
+        "SqlConnectionString", "JwtSecretKey", "JwtIssuer", "JwtAudience",
+        "JwtExpiryMinutes", "JwtRefreshExpiryDays",
+    };
+    foreach (var name in required)
+    {
+        var v = config[name];
+        Console.WriteLine($"[AuthStartup] {name}: {(string.IsNullOrWhiteSpace(v) ? "MISSING" : "present")}");
+    }
+}
+
 var host = new HostBuilder()
-    .ConfigureFunctionsWebApplication()
+    .ConfigureFunctionsWebApplication(builder =>
+    {
+        builder.UseMiddleware<JwtAuthMiddleware>();
+    })
     .ConfigureServices((ctx, services) =>
     {
         var config = ctx.Configuration;
+        TraceConfigPresence(config);
+
+        // ---- Application Insights (register FIRST so DI failures later are
+        // captured in App Insights traces, not just stdout). ---------------
+        services.AddApplicationInsightsTelemetryWorkerService();
+        services.ConfigureFunctionsApplicationInsights();
+
+        services.AddHttpContextAccessor();
 
         var connectionString = config["SqlConnectionString"]
             ?? throw new InvalidOperationException("SqlConnectionString is required.");
@@ -35,8 +68,15 @@ var host = new HostBuilder()
             opts.UseSqlServer(connectionString, sql => sql.EnableRetryOnFailure(3)));
         services.AddScoped<ICompanyContext>(_ => ExplicitCompanyContext.System);
 
-        // ---- ASP.NET Core Identity ---------------------------------------
-        services.AddIdentity<ApplicationUser, Microsoft.AspNetCore.Identity.IdentityRole>(opts =>
+        // ---- ASP.NET Core Identity (core only; no cookie schemes) --------
+        // AddIdentity<,> registers cookie-based authentication schemes
+        // (Identity.Application etc.) that collide with AddJwtBearer on the
+        // isolated worker and can prevent the host from starting — which
+        // manifests as "only WarmUp is indexed" on Azure. We use
+        // AddIdentityCore + AddSignInManager + AddRoles to get UserManager,
+        // SignInManager, role support, and password hashing without the
+        // cookie handlers we don't use.
+        services.AddIdentityCore<ApplicationUser>(opts =>
         {
             opts.Password.RequiredLength         = 8;
             opts.Password.RequireNonAlphanumeric = true;
@@ -48,7 +88,10 @@ var host = new HostBuilder()
 
             opts.User.RequireUniqueEmail = true;
         })
-        .AddEntityFrameworkStores<AtlasIdentityDbContext>();
+        .AddRoles<Microsoft.AspNetCore.Identity.IdentityRole>()
+        .AddEntityFrameworkStores<AtlasIdentityDbContext>()
+        .AddSignInManager()
+        .AddDefaultTokenProviders();
 
         // ---- JWT Bearer --------------------------------------------------
         var jwtKey = config["JwtSecretKey"]
@@ -81,60 +124,127 @@ var host = new HostBuilder()
 
         // ---- Application services ----------------------------------------
         services.AddScoped<ITokenService, TokenService>();
-
-        // ---- Application Insights ----------------------------------------
-        services.AddApplicationInsightsTelemetryWorkerService();
-        services.ConfigureFunctionsApplicationInsights();
     })
     .Build();
 
-// ---- Seed roles and default admin on first start -------------------------
-await SeedAsync(host.Services);
+// ---- Seed roles + tenant companies + bootstrap users ---------------------
+// Run as a background task *after* the host starts. On Azure Linux Consumption
+// the platform gives the isolated worker a limited initialization window; a
+// cold Azure SQL first-connection plus Identity migrations plus user inserts
+// can easily exceed it and the platform kills the worker before function
+// indexing finishes -- which shows up as "only WarmUp is registered" in the
+// portal. Kicking the seed off in the background lets RunAsync proceed
+// immediately and the Functions host indexes in parallel.
+var seedLog = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
+_ = Task.Run(async () =>
+{
+    try
+    {
+        await SeedAsync(host.Services);
+        seedLog.LogInformation("Startup seed completed.");
+    }
+    catch (Exception ex)
+    {
+        // Non-fatal: the host stays up and endpoints remain reachable.
+        // The seed is idempotent so a later restart will retry.
+        seedLog.LogError(ex, "Startup seed failed; Function App will continue running. Retry by restarting the app.");
+    }
+});
 
 await host.RunAsync();
 
 // ---------------------------------------------------------------------------
+// Bootstrap seed — runs on Auth Functions startup. Creates every tenant company
+// and user in a single pass using UserManager directly (no HTTP, no ordering).
+// Idempotent: existing rows are left untouched.
+// ---------------------------------------------------------------------------
 static async Task SeedAsync(IServiceProvider services)
 {
+    var secureTransportId = Guid.Parse("10000000-0000-0000-0000-000000000001");
+    var demoCompanyId     = Guid.Parse("20000000-0000-0000-0000-000000000001");
+
     using var scope = services.CreateScope();
     var sp = scope.ServiceProvider;
 
-    var db = sp.GetRequiredService<AtlasIdentityDbContext>();
-    await db.Database.MigrateAsync();
+    var identityDb = sp.GetRequiredService<AtlasIdentityDbContext>();
+    await identityDb.Database.MigrateAsync();
 
-    var roleManager = sp.GetRequiredService<Microsoft.AspNetCore.Identity.RoleManager<
-        Microsoft.AspNetCore.Identity.IdentityRole>>();
+    var businessDb = sp.GetRequiredService<AtlasDbContext>();
+    var roleManager = sp.GetRequiredService<RoleManager<IdentityRole>>();
+    var userManager = sp.GetRequiredService<UserManager<ApplicationUser>>();
+    var logger = sp.GetRequiredService<ILoggerFactory>().CreateLogger("AuthSeed");
 
+    // ---- 1. Roles ----------------------------------------------------------
     foreach (var role in Roles.All)
     {
         if (!await roleManager.RoleExistsAsync(role))
-            await roleManager.CreateAsync(new Microsoft.AspNetCore.Identity.IdentityRole(role));
+            await roleManager.CreateAsync(new IdentityRole(role));
     }
 
-    // Seed an initial admin from environment (optional — skip if already exists)
+    // ---- 2. Companies (business DB) ----------------------------------------
+    await UpsertCompanyAsync(businessDb, secureTransportId, "Secure Transport", "secure-transport", "secure@gmail.com");
+    await UpsertCompanyAsync(businessDb, demoCompanyId,     "Demo Company",     "demo-company",     "demo@atheres.com");
+    await businessDb.SaveChangesAsync();
+
+    // ---- 3. Users (Identity DB) --------------------------------------------
     var config = sp.GetRequiredService<IConfiguration>();
-    var adminEmail    = config["SeedAdminEmail"];
-    var adminPassword = config["SeedAdminPassword"];
+    var bootstrapEmail    = config["SeedAdminEmail"];
+    var bootstrapPassword = config["SeedAdminPassword"];
 
-    if (!string.IsNullOrWhiteSpace(adminEmail) && !string.IsNullOrWhiteSpace(adminPassword))
+    var users = new List<SeedUser>();
+
+    if (!string.IsNullOrWhiteSpace(bootstrapEmail) && !string.IsNullOrWhiteSpace(bootstrapPassword))
     {
-        var userManager = sp.GetRequiredService<
-            Microsoft.AspNetCore.Identity.UserManager<ApplicationUser>>();
+        users.Add(new SeedUser(bootstrapEmail, bootstrapPassword, "Global", "Administrator", null, Roles.SuperAdmin));
+    }
 
-        if (await userManager.FindByEmailAsync(adminEmail) is null)
+    users.AddRange(new[]
+    {
+        new SeedUser("ken@atheres.com",      "Phone@3313059708",  "Ken",    "Administrator", null,              Roles.SuperAdmin),
+        new SeedUser("secure@gmail.com",     "Secure@1234567890", "Secure", "Admin",         secureTransportId, Roles.Admin),
+        new SeedUser("secureuser@gmail.com", "Secure@1234567890", "Secure", "User",          secureTransportId, Roles.Driver),
+        new SeedUser("demo@atheres.com",     "Phone@3464978286",  "Demo",   "Admin",         demoCompanyId,     Roles.Admin),
+        new SeedUser("demouser@atheres.com", "Phone@3464978286",  "Demo",   "User",          demoCompanyId,     Roles.Driver),
+    });
+
+    foreach (var u in users)
+    {
+        if (await userManager.FindByEmailAsync(u.Email) is not null) continue;
+
+        var appUser = new ApplicationUser
         {
-            var admin = new ApplicationUser
-            {
-                UserName  = adminEmail,
-                Email     = adminEmail,
-                FirstName = "Global",
-                LastName  = "Administrator",
-                // CompanyId intentionally null — SuperAdmin is cross-tenant
-            };
+            UserName  = u.Email,
+            Email     = u.Email,
+            FirstName = u.FirstName,
+            LastName  = u.LastName,
+            CompanyId = u.CompanyId,
+        };
 
-            var result = await userManager.CreateAsync(admin, adminPassword);
-            if (result.Succeeded)
-                await userManager.AddToRoleAsync(admin, Roles.SuperAdmin);
+        var result = await userManager.CreateAsync(appUser, u.Password);
+        if (!result.Succeeded)
+        {
+            logger.LogWarning("Seed: failed to create {Email}: {Errors}",
+                u.Email, string.Join("; ", result.Errors.Select(e => e.Description)));
+            continue;
         }
+
+        await userManager.AddToRoleAsync(appUser, u.Role);
+        logger.LogInformation("Seed: created {Email} as {Role}", u.Email, u.Role);
     }
 }
+
+static async Task UpsertCompanyAsync(AtlasDbContext db, Guid id, string name, string slug, string contactEmail)
+{
+    if (await db.Companies.AnyAsync(c => c.Id == id)) return;
+    db.Companies.Add(new Company
+    {
+        Id           = id,
+        Name         = name,
+        Slug         = slug,
+        ContactEmail = contactEmail,
+        Timezone     = "America/Chicago",
+        IsActive     = true,
+    });
+}
+
+record SeedUser(string Email, string Password, string FirstName, string LastName, Guid? CompanyId, string Role);

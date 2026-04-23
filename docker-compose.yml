@@ -96,6 +96,9 @@ services:
     volumes:
       - ./docker/servicebus/config.json:/ServiceBus_Emulator/ConfigFiles/Config.json:ro
     ports:
+      # When native RabbitMQ owns IPv4 5672, Docker Desktop still grabs the IPv6
+      # side (::). Clients use sb://[::1] to force IPv6 resolution and land on
+      # the emulator instead of RabbitMQ.
       - "5672:5672"
     # Note: emulator image has no shell/nc — healthcheck disabled
     # Functions uses service_started + its own retry logic

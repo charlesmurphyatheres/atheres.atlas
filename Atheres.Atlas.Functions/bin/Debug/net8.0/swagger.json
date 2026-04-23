@@ -1,7 +1,7 @@
 {
   "openapi": "3.0.3",
   "info": {
-    "title": "Atheres Atlas API",
+    "title": "Atlas Deliver API",
     "description": "Delivery management system — order ingestion, batch scheduling, route optimization, and delivery confirmation.",
     "version": "1.0.0"
   },

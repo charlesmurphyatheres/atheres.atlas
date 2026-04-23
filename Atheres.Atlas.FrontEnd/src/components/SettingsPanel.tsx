@@ -2,17 +2,12 @@ import { useEffect, useState } from 'react'
 import { getSettings, saveSettings } from '../services/apiService'
 import type { UserRouteSettings } from '../types'
 
+// Start and end addresses are no longer configured here — every route
+// originates and terminates at the assigned truck's home hub (set per-van
+// in Administration → Vans).
 export default function SettingsPanel() {
   const [settings, setSettings] = useState<UserRouteSettings>({
     userId: 'default',
-    startAddress: '',
-    startCity: '',
-    startState: '',
-    startZip: '',
-    endAddress: '',
-    endCity: '',
-    endState: '',
-    endZip: '',
     deliveryWindowStart: '08:00:00',
     deliveryWindowEnd: '17:00:00',
     confirmationDeadlineHours: 3,
@@ -20,6 +15,7 @@ export default function SettingsPanel() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     getSettings('default')
@@ -31,10 +27,14 @@ export default function SettingsPanel() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setSaving(true)
+    setError(null)
     try {
       await saveSettings(settings)
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
+    } catch (err: any) {
+      const message = err?.response?.data?.error ?? err?.message ?? 'Failed to save settings.'
+      setError(message)
     } finally {
       setSaving(false)
     }
@@ -49,62 +49,12 @@ export default function SettingsPanel() {
   return (
     <div className="max-w-2xl space-y-6">
       <h1 className="text-2xl font-bold text-gray-900">Route Settings</h1>
+      <p className="text-sm text-gray-500 -mt-3">
+        Routes start and end at each van's home hub. Configure hubs under
+        Administration → Hubs and assign them per van under Administration → Vans.
+      </p>
 
       <form onSubmit={handleSubmit} className="space-y-6">
-        {/* Start / depot location */}
-        <Section title="Start Location (Depot)">
-          <Field label="Street Address">
-            <input type="text" value={settings.startAddress}
-              onChange={(e) => update('startAddress', e.target.value)}
-              className={inputClass} placeholder="123 Warehouse Blvd" required />
-          </Field>
-          <div className="grid grid-cols-3 gap-3">
-            <Field label="City">
-              <input type="text" value={settings.startCity}
-                onChange={(e) => update('startCity', e.target.value)}
-                className={inputClass} placeholder="Denver" required />
-            </Field>
-            <Field label="State">
-              <input type="text" value={settings.startState} maxLength={2}
-                onChange={(e) => update('startState', e.target.value.toUpperCase())}
-                className={inputClass} placeholder="CO" required />
-            </Field>
-            <Field label="ZIP">
-              <input type="text" value={settings.startZip}
-                onChange={(e) => update('startZip', e.target.value)}
-                className={inputClass} placeholder="80201" required />
-            </Field>
-          </div>
-        </Section>
-
-        {/* End location */}
-        <Section title="End Location (Return)">
-          <p className="text-sm text-gray-500 -mt-1 mb-3">Leave the same as start for round-trip routes.</p>
-          <Field label="Street Address">
-            <input type="text" value={settings.endAddress}
-              onChange={(e) => update('endAddress', e.target.value)}
-              className={inputClass} placeholder="123 Warehouse Blvd" required />
-          </Field>
-          <div className="grid grid-cols-3 gap-3">
-            <Field label="City">
-              <input type="text" value={settings.endCity}
-                onChange={(e) => update('endCity', e.target.value)}
-                className={inputClass} placeholder="Denver" required />
-            </Field>
-            <Field label="State">
-              <input type="text" value={settings.endState} maxLength={2}
-                onChange={(e) => update('endState', e.target.value.toUpperCase())}
-                className={inputClass} placeholder="CO" required />
-            </Field>
-            <Field label="ZIP">
-              <input type="text" value={settings.endZip}
-                onChange={(e) => update('endZip', e.target.value)}
-                className={inputClass} placeholder="80201" required />
-            </Field>
-          </div>
-        </Section>
-
-        {/* Delivery window & confirmation */}
         <Section title="Delivery Window & Confirmation">
           <div className="grid grid-cols-2 gap-3">
             <Field label="Window Start">
@@ -137,6 +87,7 @@ export default function SettingsPanel() {
             {saving ? 'Saving...' : 'Save Settings'}
           </button>
           {saved && <span className="text-sm text-green-600 font-medium">✓ Saved successfully</span>}
+          {error && <span className="text-sm text-red-600 font-medium">⚠ {error}</span>}
         </div>
       </form>
     </div>

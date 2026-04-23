@@ -1,6 +1,6 @@
 #Requires -Version 7.0
 # =============================================================
-# Atheres Atlas — Docker Deployment Script  (Windows PowerShell 7+)
+# Atlas Deliver — Docker Deployment Script  (Windows PowerShell 7+)
 #
 # Usage:
 #   .\deploy.ps1              # full deploy
@@ -58,7 +58,7 @@ if ($Help) {
 
 # ---- Down ---------------------------------------------------
 if ($Down) {
-    Write-Header "Stopping Atheres Atlas"
+    Write-Header "Stopping Atlas Deliver"
     docker compose down
     Write-Ok "All containers stopped."
     $deployStopwatch.Stop()
@@ -68,7 +68,7 @@ if ($Down) {
 
 # ---- Clean --------------------------------------------------
 if ($Clean) {
-    Write-Header "Removing Atheres Atlas (containers + volumes)"
+    Write-Header "Removing Atlas Deliver (containers + volumes)"
     Write-Warn "This will DELETE all database data!"
     $confirm = Read-Host "Are you sure? [y/N]"
     if ($confirm -notmatch '^[Yy]$') { Write-Info "Aborted."; exit 0 }
@@ -276,25 +276,19 @@ if (-not $appReady) {
     exit 1
 }
 
-# ---- Seed Secure Transport company ----------------------------
-Write-Header "Seeding Secure Transport"
+# ---- Import Secure Transport hubs/vans (companies + users seeded in code) ----
+$saPassword = [System.Environment]::GetEnvironmentVariable("MSSQL_SA_PASSWORD")
+$dockerBusinessConn = "Server=localhost;Database=AtheresAtlas;User Id=sa;Password=$saPassword;TrustServerCertificate=True;"
+$dockerIdentityConn = "Server=localhost;Database=AtheresAtlas;User Id=sa;Password=$saPassword;TrustServerCertificate=True;"
+
+Write-Header "Importing Secure Transport data"
 $seedScript = Join-Path $PSScriptRoot "seed-secure-transport.ps1"
 if (Test-Path $seedScript) {
-    $saPassword = [System.Environment]::GetEnvironmentVariable("MSSQL_SA_PASSWORD")
-    $dockerBusinessConn = "Server=localhost;Database=AtheresAtlas;User Id=sa;Password=$saPassword;TrustServerCertificate=True;"
-    $dockerIdentityConn = "Server=localhost;Database=AtheresAtlas;User Id=sa;Password=$saPassword;TrustServerCertificate=True;"
     & $seedScript -ConnectionString $dockerBusinessConn -IdentityConnectionString $dockerIdentityConn
 }
 
-# ---- Seed additional global users ------------------------------
-Write-Header "Seeding additional users"
-$seedUsersScript = Join-Path $PSScriptRoot "seed-users.ps1"
-if (Test-Path $seedUsersScript) {
-    & $seedUsersScript -AuthApiUrl "http://localhost:7072"
-}
-
 # ---- Summary ------------------------------------------------
-Write-Header "Atheres Atlas is running"
+Write-Header "Atlas Deliver is running"
 
 Write-Host ""
 Write-Host "  Application      " -NoNewline; Write-Host "http://localhost:9708"              -ForegroundColor Green

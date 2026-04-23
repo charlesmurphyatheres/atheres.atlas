@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { getRoutes, getTrucks, triggerRouteOptimization, confirmDeliveryManual, reorderRouteStop } from '../../services/apiService'
+import { getRoutes, getTrucks, confirmDeliveryManual, reorderRouteStop } from '../../services/apiService'
 import type { Route, RouteStop, Truck } from '../../types'
 import { format, addDays, subDays } from 'date-fns'
 
@@ -24,26 +24,15 @@ export default function LogisticsPanel() {
     setDate(format(days > 0 ? addDays(d, days) : subDays(d, -days), 'yyyy-MM-dd'))
   }
 
-  async function handleOptimize() {
-    if (!confirm(`Trigger route optimization for ${date}?`)) return
-    await triggerRouteOptimization({ deliveryDate: date, orderIds: [] })
-    alert('Optimization request submitted. Routes will update shortly.')
-  }
-
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Logistics</h1>
-          <p className="text-sm text-gray-500 mt-0.5">Multi-truck delivery schedule</p>
-        </div>
-        <button
-          onClick={handleOptimize}
-          className="px-4 py-2 bg-brand-500 text-white text-sm font-medium rounded-lg hover:bg-brand-600 transition-colors"
-        >
-          Run Optimization
-        </button>
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">Logistics</h1>
+        <p className="text-sm text-gray-500 mt-0.5">
+          Multi-truck delivery schedule. Routes are generated automatically when
+          orders are marked ready to pickup.
+        </p>
       </div>
 
       {/* Date navigation */}

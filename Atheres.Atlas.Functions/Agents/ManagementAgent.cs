@@ -26,6 +26,7 @@ public class ManagementAgent
     private readonly IRouteRepository _routes;
     private readonly IServiceBusPublisher _bus;
     private readonly AtlasDbContext _db;
+    private readonly IGoogleMapsService _maps;
     private readonly ILogger<ManagementAgent> _logger;
 
     public ManagementAgent(
@@ -33,12 +34,14 @@ public class ManagementAgent
         IRouteRepository routes,
         IServiceBusPublisher bus,
         AtlasDbContext db,
+        IGoogleMapsService maps,
         ILogger<ManagementAgent> logger)
     {
         _orders = orders;
         _routes = routes;
         _bus = bus;
         _db = db;
+        _maps = maps;
         _logger = logger;
     }
 
@@ -65,12 +68,51 @@ public class ManagementAgent
                 t.LicensePlate,
                 t.HubId,
                 hubName = t.Hub != null ? t.Hub.Name : null,
+                t.CurrentLocationAddress,
+                t.CurrentLocationLatitude,
+                t.CurrentLocationLongitude,
+                t.CurrentLocationUpdatedAt,
                 t.AssignedDriverId,
                 t.IsActive,
             })
             .ToListAsync(ct);
 
         return new OkObjectResult(trucks);
+    }
+
+    /// <summary>Geocodes an address (if supplied and changed) and stamps the truck's
+    /// current-location fields. Empty string clears the location.</summary>
+    private async Task ApplyCurrentLocationAsync(
+        Domain.Entities.Truck truck, string? address, CancellationToken ct)
+    {
+        if (address is null) return;
+
+        var trimmed = address.Trim();
+        if (string.IsNullOrEmpty(trimmed))
+        {
+            truck.CurrentLocationAddress   = null;
+            truck.CurrentLocationLatitude  = null;
+            truck.CurrentLocationLongitude = null;
+            truck.CurrentLocationUpdatedAt = DateTime.UtcNow;
+            return;
+        }
+
+        // Skip re-geocoding if the address hasn't changed and we already have coords.
+        if (string.Equals(truck.CurrentLocationAddress, trimmed, StringComparison.Ordinal)
+            && truck.CurrentLocationLatitude.HasValue
+            && truck.CurrentLocationLongitude.HasValue)
+        {
+            return;
+        }
+
+        var geo = await _maps.GeocodeAsync(trimmed, ct);
+        truck.CurrentLocationAddress   = trimmed;
+        truck.CurrentLocationLatitude  = geo?.Latitude;
+        truck.CurrentLocationLongitude = geo?.Longitude;
+        truck.CurrentLocationUpdatedAt = DateTime.UtcNow;
+
+        if (geo is null)
+            _logger.LogWarning("Could not geocode truck {Id} location '{Address}'", truck.Id, trimmed);
     }
 
     // -----------------------------------------------------------------------
@@ -91,6 +133,7 @@ public class ManagementAgent
 
         var licensePlate = doc.RootElement.TryGetProperty("licensePlate", out var lp) ? lp.GetString() : null;
         Guid? hubId = doc.RootElement.TryGetProperty("hubId", out var h) && Guid.TryParse(h.GetString(), out var hid) ? hid : null;
+        var currentLocation = doc.RootElement.TryGetProperty("currentLocationAddress", out var loc) ? loc.GetString() : null;
 
         var companyId = req.HttpContext.User.FindFirst("companyId")?.Value;
         if (!Guid.TryParse(companyId, out var cid))
@@ -103,6 +146,8 @@ public class ManagementAgent
             LicensePlate = licensePlate,
             HubId = hubId,
         };
+        await ApplyCurrentLocationAsync(truck, currentLocation, ct);
+
         _db.Trucks.Add(truck);
         await _db.SaveChangesAsync(ct);
 
@@ -136,6 +181,8 @@ public class ManagementAgent
             truck.HubId = Guid.TryParse(h.GetString(), out var hid) ? hid : null;
         if (doc.RootElement.TryGetProperty("assignedDriverId", out var d))
             truck.AssignedDriverId = d.GetString();
+        if (doc.RootElement.TryGetProperty("currentLocationAddress", out var loc))
+            await ApplyCurrentLocationAsync(truck, loc.GetString(), ct);
 
         truck.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct);

@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { getOrders, getRoutes } from '../services/apiService'
 import type { Notification, Order, Route } from '../types'
 import { format } from 'date-fns'
+import { useSortedRows } from '../hooks/useSortedRows'
+import { SortHeader } from './ui/SortHeader'
 
 interface Props {
   notifications: Notification[]
@@ -19,6 +21,9 @@ export default function Dashboard({ notifications }: Props) {
   const [todayRoutes, setTodayRoutes] = useState<Route[]>([])
   const [recentOrders, setRecentOrders] = useState<Order[]>([])
   const [loading, setLoading] = useState(true)
+  const { sorted: sortedRecent, sortKey, sortDir, toggle } = useSortedRows(recentOrders, {
+    accessors: { districtZone: (o) => `${o.district ?? ''} / ${o.zone ?? ''}` },
+  })
 
   useEffect(() => {
     async function load() {
@@ -108,13 +113,15 @@ export default function Dashboard({ notifications }: Props) {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
               <tr>
-                {['Store', 'City', 'District/Zone', 'Expected Delivery', 'Status'].map((h) => (
-                  <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
-                ))}
+                <SortHeader label="Store"             sortKey="storeName"            activeKey={sortKey} dir={sortDir} onClick={() => toggle('storeName')} />
+                <SortHeader label="City"              sortKey="city"                 activeKey={sortKey} dir={sortDir} onClick={() => toggle('city')} />
+                <SortHeader label="District/Zone"     sortKey="districtZone"         activeKey={sortKey} dir={sortDir} onClick={() => toggle('districtZone')} />
+                <SortHeader label="Expected Delivery" sortKey="expectedDeliveryDate" activeKey={sortKey} dir={sortDir} onClick={() => toggle('expectedDeliveryDate')} />
+                <SortHeader label="Status"            sortKey="status"               activeKey={sortKey} dir={sortDir} onClick={() => toggle('status')} />
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {recentOrders.map((o) => (
+              {sortedRecent.map((o) => (
                 <tr key={o.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3 font-medium text-gray-900">{o.storeName}</td>
                   <td className="px-4 py-3 text-gray-600">{o.city}, {o.state}</td>

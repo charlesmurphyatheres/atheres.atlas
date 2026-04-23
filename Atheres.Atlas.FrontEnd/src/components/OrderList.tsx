@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { getOrders } from '../services/apiService'
 import type { Order, OrderStatus } from '../types'
 import { format } from 'date-fns'
+import { useSortedRows } from '../hooks/useSortedRows'
+import { SortHeader } from './ui/SortHeader'
 
 const STATUS_OPTIONS: { value: OrderStatus | ''; label: string }[] = [
   { value: '', label: 'All Statuses' },
@@ -23,6 +25,7 @@ export default function OrderList() {
   const [statusFilter, setStatusFilter] = useState<OrderStatus | ''>('')
   const [loading, setLoading] = useState(false)
   const pageSize = 20
+  const { sorted: sortedOrders, sortKey, sortDir, toggle } = useSortedRows(orders)
 
   useEffect(() => {
     setLoading(true)
@@ -56,9 +59,14 @@ export default function OrderList() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
               <tr>
-                {['Store', 'Address', 'District', 'Zone', 'Order Date', 'Expected Delivery', 'Confirmation', 'Status'].map((h) => (
-                  <th key={h} className="px-4 py-3 text-left font-medium whitespace-nowrap">{h}</th>
-                ))}
+                <SortHeader label="Store"             sortKey="storeName"            activeKey={sortKey} dir={sortDir} onClick={() => toggle('storeName')} />
+                <SortHeader label="Address"           sortKey="city"                 activeKey={sortKey} dir={sortDir} onClick={() => toggle('city')} />
+                <SortHeader label="District"          sortKey="district"             activeKey={sortKey} dir={sortDir} onClick={() => toggle('district')} />
+                <SortHeader label="Zone"              sortKey="zone"                 activeKey={sortKey} dir={sortDir} onClick={() => toggle('zone')} />
+                <SortHeader label="Order Date"        sortKey="orderDate"            activeKey={sortKey} dir={sortDir} onClick={() => toggle('orderDate')} />
+                <SortHeader label="Expected Delivery" sortKey="expectedDeliveryDate" activeKey={sortKey} dir={sortDir} onClick={() => toggle('expectedDeliveryDate')} />
+                <SortHeader label="Confirmation"      sortKey="confirmationDeadline" activeKey={sortKey} dir={sortDir} onClick={() => toggle('confirmationDeadline')} />
+                <SortHeader label="Status"            sortKey="status"               activeKey={sortKey} dir={sortDir} onClick={() => toggle('status')} />
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -66,12 +74,12 @@ export default function OrderList() {
                 <tr>
                   <td colSpan={8} className="px-4 py-8 text-center text-gray-400">Loading...</td>
                 </tr>
-              ) : orders.length === 0 ? (
+              ) : sortedOrders.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="px-4 py-8 text-center text-gray-400">No orders found.</td>
                 </tr>
               ) : (
-                orders.map((o) => (
+                sortedOrders.map((o) => (
                   <tr key={o.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium text-gray-900 whitespace-nowrap">{o.storeName}</td>
                     <td className="px-4 py-3 text-gray-600 whitespace-nowrap">{o.city}, {o.state}</td>

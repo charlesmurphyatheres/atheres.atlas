@@ -3,6 +3,8 @@ import { GoogleMap, useJsApiLoader, Marker, InfoWindow } from '@react-google-map
 import { getRoutes } from '../services/apiService'
 import type { Route, RouteStop } from '../types'
 import { format } from 'date-fns'
+import { useSortedRows } from '../hooks/useSortedRows'
+import { SortHeader } from './ui/SortHeader'
 
 const GOOGLE_MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY ?? ''
 
@@ -97,48 +99,54 @@ export default function RouteMap() {
       </div>
 
       {/* Stop list */}
-      {allStops.length > 0 && (
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
-              <tr>
-                {['#', 'Store', 'Address', 'ETA', 'Leg Distance', 'Confirmation'].map((h) => (
-                  <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {allStops
-                .slice()
-                .sort((a, b) => a.sequence - b.sequence)
-                .map((stop) => (
-                  <tr
-                    key={stop.orderId}
-                    className="hover:bg-gray-50 cursor-pointer"
-                    onClick={() => setSelectedStop(stop)}
-                  >
-                    <td className="px-4 py-3 font-bold text-brand-500">{stop.sequence}</td>
-                    <td className="px-4 py-3 font-medium text-gray-900">{stop.storeName}</td>
-                    <td className="px-4 py-3 text-gray-500 truncate max-w-[200px]">{stop.address}</td>
-                    <td className="px-4 py-3 text-gray-600">
-                      {stop.estimatedArrival
-                        ? format(new Date(stop.estimatedArrival), 'h:mm a')
-                        : '—'}
-                    </td>
-                    <td className="px-4 py-3 text-gray-500">{stop.legDistanceMiles.toFixed(1)} mi</td>
-                    <td className="px-4 py-3">
-                      <ConfirmBadge status={stop.confirmationStatus} />
-                    </td>
-                  </tr>
-                ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      {allStops.length > 0 && <StopsTable stops={allStops} onSelect={setSelectedStop} />}
 
       {!loading && routes.length === 0 && (
         <div className="text-center py-12 text-gray-400">No routes found for {selectedDate}.</div>
       )}
+    </div>
+  )
+}
+
+function StopsTable({ stops, onSelect }: { stops: RouteStop[]; onSelect: (s: RouteStop) => void }) {
+  const { sorted, sortKey, sortDir, toggle } = useSortedRows(stops, {
+    initial: { key: 'sequence', dir: 'asc' },
+    accessors: { legDistance: (s) => s.legDistanceMiles },
+  })
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+      <table className="w-full text-sm">
+        <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
+          <tr>
+            <SortHeader label="#"            sortKey="sequence"           activeKey={sortKey} dir={sortDir} onClick={() => toggle('sequence')} />
+            <SortHeader label="Store"        sortKey="storeName"          activeKey={sortKey} dir={sortDir} onClick={() => toggle('storeName')} />
+            <SortHeader label="Address"      sortKey="address"            activeKey={sortKey} dir={sortDir} onClick={() => toggle('address')} />
+            <SortHeader label="ETA"          sortKey="estimatedArrival"   activeKey={sortKey} dir={sortDir} onClick={() => toggle('estimatedArrival')} />
+            <SortHeader label="Leg Distance" sortKey="legDistance"        activeKey={sortKey} dir={sortDir} onClick={() => toggle('legDistance')} />
+            <SortHeader label="Confirmation" sortKey="confirmationStatus" activeKey={sortKey} dir={sortDir} onClick={() => toggle('confirmationStatus')} />
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100">
+          {sorted.map((stop) => (
+            <tr
+              key={stop.orderId}
+              className="hover:bg-gray-50 cursor-pointer"
+              onClick={() => onSelect(stop)}
+            >
+              <td className="px-4 py-3 font-bold text-brand-500">{stop.sequence}</td>
+              <td className="px-4 py-3 font-medium text-gray-900">{stop.storeName}</td>
+              <td className="px-4 py-3 text-gray-500 truncate max-w-[200px]">{stop.address}</td>
+              <td className="px-4 py-3 text-gray-600">
+                {stop.estimatedArrival ? format(new Date(stop.estimatedArrival), 'h:mm a') : '—'}
+              </td>
+              <td className="px-4 py-3 text-gray-500">{stop.legDistanceMiles.toFixed(1)} mi</td>
+              <td className="px-4 py-3">
+                <ConfirmBadge status={stop.confirmationStatus} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }

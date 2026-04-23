@@ -17,7 +17,7 @@ public class SendGridEmailService : IEmailService
         _apiKey = Environment.GetEnvironmentVariable("SendGridApiKey")
                   ?? throw new InvalidOperationException("SendGridApiKey is not configured.");
         _fromEmail = Environment.GetEnvironmentVariable("SendGridFromEmail") ?? "noreply@atheres-atlas.com";
-        _fromName = Environment.GetEnvironmentVariable("SendGridFromName") ?? "Atheres Atlas Delivery";
+        _fromName = Environment.GetEnvironmentVariable("SendGridFromName") ?? "Atlas Deliver";
     }
 
     // DEBUG: redirect all emails to this address. Remove for production.

@@ -61,7 +61,7 @@ function Write-Err     { param($msg) Write-Host "[ERROR] $msg"  -ForegroundColor
 # ---- Help ---------------------------------------------------
 if ($Help) {
     Write-Host @"
-Atheres Atlas — Local Debug Deployment
+Atlas Deliver — Local Debug Deployment
 
   .\deploy-debug.ps1                  Full local debug deploy
   .\deploy-debug.ps1 -InfraOnly       Docker infra only
@@ -158,6 +158,37 @@ if (Test-Path $envFile) {
     Write-Ok "Loaded .env"
 } else {
     Write-Warn "No .env file found — using defaults from local.settings.json"
+}
+
+# ---- Sync Google Maps key into Functions + frontend ----------
+$mapsKey = [System.Environment]::GetEnvironmentVariable("GOOGLE_MAPS_API_KEY")
+if ($mapsKey) {
+    # Functions reads GoogleMapsApiKey from local.settings.json; patch in place
+    foreach ($settingsPath in @(
+        (Join-Path $root "Atheres.Atlas.Functions\local.settings.json"),
+        (Join-Path $root "Atheres.Atlas.Auth.Functions\local.settings.json"))) {
+        if (Test-Path $settingsPath) {
+            $json = Get-Content $settingsPath -Raw | ConvertFrom-Json
+            if ($json.Values.PSObject.Properties.Name -contains 'GoogleMapsApiKey') {
+                if ($json.Values.GoogleMapsApiKey -ne $mapsKey) {
+                    $json.Values.GoogleMapsApiKey = $mapsKey
+                    $json | ConvertTo-Json -Depth 6 | Set-Content $settingsPath -Encoding UTF8
+                    Write-Info "Updated GoogleMapsApiKey in $(Split-Path $settingsPath -Leaf)"
+                }
+            }
+        }
+    }
+
+    # Vite reads VITE_GOOGLE_MAPS_KEY from .env.local in the frontend project
+    $feEnv = Join-Path $root "Atheres.Atlas.FrontEnd\.env.local"
+    $desired = "VITE_GOOGLE_MAPS_KEY=$mapsKey"
+    $current = if (Test-Path $feEnv) { Get-Content $feEnv -Raw } else { "" }
+    if ($current.Trim() -ne $desired) {
+        Set-Content $feEnv $desired -Encoding UTF8
+        Write-Info "Wrote $feEnv"
+    }
+} else {
+    Write-Warn "GOOGLE_MAPS_API_KEY not set in .env — maps and route optimization will fail."
 }
 
 # ---- Start Docker infrastructure ----------------------------
@@ -312,33 +343,38 @@ if (-not $SkipMigrations) {
     $env:JwtIssuer = "http://localhost"
     $env:JwtAudience = "http://localhost"
     $env:ServiceBusConnection = "Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
+    # On dev boxes where native RabbitMQ holds IPv4 5672 and blocks Service Bus
+    # publishes, run the route optimizer in-process instead of via the queue.
+    $env:DirectOptimizer = "true"
+
+    # Build startup projects first so EF picks up the freshly-compiled migration
+    # DLLs. `dotnet ef --no-build` (and even the build fallback) can miss changes
+    # inside the referenced Data project when the startup project hasn't itself
+    # changed, leaving a stale Atheres.Atlas.Data.dll under Functions' bin/.
+    $authProjForMigration = Join-Path $root "Atheres.Atlas.Auth.Functions"
+
+    Write-Info "Building migration startup projects..."
+    dotnet build $functionsProj -c Debug --nologo -v minimal
+    if ($LASTEXITCODE -ne 0) { Write-Err "Functions build failed."; exit 1 }
+    dotnet build $authProjForMigration -c Debug --nologo -v minimal
+    if ($LASTEXITCODE -ne 0) { Write-Err "Auth Functions build failed."; exit 1 }
 
     Write-Info "Migrating AtlasDbContext..."
     Push-Location $dataDir
-    dotnet ef database update --context AtlasDbContext --startup-project $functionsProj --no-build 2>$null
+    dotnet ef database update --context AtlasDbContext --startup-project $functionsProj --no-build
     if ($LASTEXITCODE -ne 0) {
-        Write-Warn "Migration with --no-build failed, retrying with build..."
-        dotnet ef database update --context AtlasDbContext --startup-project $functionsProj
-        if ($LASTEXITCODE -ne 0) {
-            Write-Err "AtlasDbContext migration failed."
-            Pop-Location
-            exit 1
-        }
+        Write-Err "AtlasDbContext migration failed."
+        Pop-Location
+        exit 1
     }
     Write-Ok "AtlasDbContext migrated."
 
-    # AtlasIdentityDbContext is registered in the Auth Functions project
-    $authProjForMigration = Join-Path $root "Atheres.Atlas.Auth.Functions"
     Write-Info "Migrating AtlasIdentityDbContext..."
-    dotnet ef database update --context AtlasIdentityDbContext --startup-project $authProjForMigration --no-build 2>$null
+    dotnet ef database update --context AtlasIdentityDbContext --startup-project $authProjForMigration --no-build
     if ($LASTEXITCODE -ne 0) {
-        Write-Warn "Migration with --no-build failed, retrying with build..."
-        dotnet ef database update --context AtlasIdentityDbContext --startup-project $authProjForMigration
-        if ($LASTEXITCODE -ne 0) {
-            Write-Err "AtlasIdentityDbContext migration failed."
-            Pop-Location
-            exit 1
-        }
+        Write-Err "AtlasIdentityDbContext migration failed."
+        Pop-Location
+        exit 1
     }
     Pop-Location
     Write-Ok "AtlasIdentityDbContext migrated."
@@ -417,15 +453,17 @@ if (-not $signalrTool) {
 
 $signalrCmd = Get-Command asrs-emulator -ErrorAction SilentlyContinue
 if ($signalrCmd) {
-    # Create upstream settings so the emulator knows about the Functions host
+    # Generate an upstream-settings file in the format the current asrs-emulator (1.6+)
+    # expects: the file contains only an UpstreamSettings.Templates array.
+    # Port is passed via --port; the emulator uses a fixed default access key
+    # (ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGH) which must match
+    # AzureSignalRConnectionString in local.settings.json.
     $signalrSettingsDir = Join-Path $root ".signalr-emulator"
     if (-not (Test-Path $signalrSettingsDir)) { New-Item -ItemType Directory -Path $signalrSettingsDir | Out-Null }
 
     $signalrSettings = Join-Path $signalrSettingsDir "settings.json"
     @{
-        Port = 8888
-        AccessKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-        Upstream = @{
+        UpstreamSettings = @{
             Templates = @(
                 @{
                     UrlTemplate  = "http://localhost:7071/runtime/webhooks/signalr"
@@ -442,7 +480,7 @@ if ($signalrCmd) {
 Write-Host '=== Azure SignalR Emulator (port 8888) ===' -ForegroundColor Cyan
 Write-Host 'Connection: Endpoint=http://localhost;Port=8888;AccessKey=...;Version=1.0;' -ForegroundColor Yellow
 Write-Host ''
-asrs-emulator start --settings '$signalrSettings'
+asrs-emulator start --port 8888 --config '$signalrSettings'
 "@
 
     $signalrProc = Start-Process pwsh -ArgumentList "-NoExit", "-Command", $signalrScript -PassThru
@@ -461,6 +499,7 @@ $debugFlag = if ($WaitDebugger) { "--dotnet-isolated-debug" } else { "" }
 $funcScript = @"
 `$Host.UI.RawUI.WindowTitle = 'Atlas Functions :7071'
 `$env:ServiceBusConnection = '$sbEmulatorConn'
+`$env:DirectOptimizer = 'true'
 Set-Location '$funcDir'
 Write-Host '=== Atheres.Atlas.Functions (port 7071) ===' -ForegroundColor Cyan
 Write-Host 'Attach debugger to this process for breakpoints.' -ForegroundColor Yellow
@@ -583,24 +622,18 @@ if (-not $WaitDebugger) {
         }
     }
 
-    # ---- Seed Secure Transport + additional users (API-based) ----
+    # ---- Import Secure Transport hubs/vans (companies + users already seeded in code) ----
     if (-not $SkipMigrations) {
         $seedScript = Join-Path $root "seed-secure-transport.ps1"
         if (Test-Path $seedScript) {
-            Write-Header "Seeding Secure Transport"
+            Write-Header "Importing Secure Transport data"
             & $seedScript
-        }
-
-        $seedUsersScript = Join-Path $root "seed-users.ps1"
-        if (Test-Path $seedUsersScript) {
-            Write-Header "Seeding additional users"
-            & $seedUsersScript
         }
     }
 }
 
 # ---- Summary ------------------------------------------------
-Write-Header "Atheres Atlas — Local Debug Environment"
+Write-Header "Atlas Deliver — Local Debug Environment"
 
 Write-Host ""
 Write-Host "  Infrastructure (Docker):"

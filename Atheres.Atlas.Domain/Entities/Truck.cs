@@ -16,6 +16,13 @@ public class Truck
     /// <summary>Hub where this truck is based.</summary>
     public Guid? HubId { get; set; }
 
+    /// <summary>Last-known or manually-set physical location of the vehicle.
+    /// Separate from HubId — a van may be on the road or parked away from its home hub.</summary>
+    public string?   CurrentLocationAddress    { get; set; }
+    public double?   CurrentLocationLatitude   { get; set; }
+    public double?   CurrentLocationLongitude  { get; set; }
+    public DateTime? CurrentLocationUpdatedAt  { get; set; }
+
     /// <summary>FK to AspNetUsers — the driver currently assigned to this truck.</summary>
     public string? AssignedDriverId { get; set; }
 

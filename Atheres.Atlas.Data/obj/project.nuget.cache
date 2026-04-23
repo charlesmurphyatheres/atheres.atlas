@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "IosTBHiZI7Y=",
+  "dgSpecHash": "AgmtTaXxAWY=",
   "success": true,
-  "projectFilePath": "C:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj",
+  "projectFilePath": "c:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\CharlesMurphy\\.nuget\\packages\\azure.core\\1.38.0\\azure.core.1.38.0.nupkg.sha512",
     "C:\\Users\\CharlesMurphy\\.nuget\\packages\\azure.identity\\1.11.4\\azure.identity.1.11.4.nupkg.sha512",

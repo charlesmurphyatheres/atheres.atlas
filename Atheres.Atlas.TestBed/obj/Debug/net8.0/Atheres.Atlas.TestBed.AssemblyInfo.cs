@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Atheres.Atlas.TestBed")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+e63e1a479b94527c14fc39214a5fbbdb5c9efe60")]
 [assembly: System.Reflection.AssemblyProductAttribute("Atheres.Atlas.TestBed")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Atheres.Atlas.TestBed")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

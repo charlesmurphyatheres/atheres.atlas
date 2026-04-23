@@ -4,7 +4,7 @@
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
 
-    "SqlConnectionString": "Server=localhost;Database=AtheresAtlasIdentity;User Id=sa;Password=0okmJU&ygvFR$;TrustServerCertificate=True;",
+    "SqlConnectionString": "Server=localhost;Database=AtheresAtlas;User Id=sa;Password=Richard!18641949!Strauss;TrustServerCertificate=True;",
 
     "JwtSecretKey":  "AtlasLocal!Dev#2026$SecureKey@9xQ7mZ",
     "JwtIssuer":     "http://localhost",

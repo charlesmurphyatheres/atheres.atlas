@@ -21,18 +21,6 @@ public class UserSettingsRepository : IUserSettingsRepository
         }
         else
         {
-            existing.StartAddress = settings.StartAddress;
-            existing.StartCity = settings.StartCity;
-            existing.StartState = settings.StartState;
-            existing.StartZip = settings.StartZip;
-            existing.StartLatitude = settings.StartLatitude;
-            existing.StartLongitude = settings.StartLongitude;
-            existing.EndAddress = settings.EndAddress;
-            existing.EndCity = settings.EndCity;
-            existing.EndState = settings.EndState;
-            existing.EndZip = settings.EndZip;
-            existing.EndLatitude = settings.EndLatitude;
-            existing.EndLongitude = settings.EndLongitude;
             existing.DeliveryWindowStart = settings.DeliveryWindowStart;
             existing.DeliveryWindowEnd = settings.DeliveryWindowEnd;
             existing.ConfirmationDeadlineHours = settings.ConfirmationDeadlineHours;

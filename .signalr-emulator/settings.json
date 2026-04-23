@@ -1,14 +1,12 @@
 {
-  "AccessKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-  "Upstream": {
+  "UpstreamSettings": {
     "Templates": [
       {
-        "CategoryPattern": "*",
-        "UrlTemplate": "http://localhost:7071/runtime/webhooks/signalr",
         "EventPattern": "*",
-        "HubPattern": "*"
+        "UrlTemplate": "http://localhost:7071/runtime/webhooks/signalr",
+        "HubPattern": "*",
+        "CategoryPattern": "*"
       }
     ]
-  },
-  "Port": 8888
+  }
 }

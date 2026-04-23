@@ -3,6 +3,7 @@ import { Routes, Route, NavLink, useNavigate } from 'react-router-dom'
 import Dashboard from './components/Dashboard'
 import OrderList from './components/OrderList'
 import LiveRouteTracker from './components/LiveRouteTracker'
+import CompanyPicker from './components/CompanyPicker'
 import SettingsPanel from './components/SettingsPanel'
 import NotificationPanel from './components/NotificationPanel'
 import LoginPage from './components/auth/LoginPage'
@@ -88,14 +89,13 @@ export default function App() {
                   <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
                     <div className="flex items-center justify-between h-16">
                       <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 bg-brand-500 rounded-lg flex items-center justify-center">
-                          <span className="text-white font-bold text-sm">A</span>
-                        </div>
+                        <img
+                          src="/images/atlas_logo.jpg"
+                          alt="Atlas Deliver"
+                          className="w-[2.4rem] h-[2.4rem] rounded-lg object-cover"
+                        />
                         <div>
-                          <span className="text-xl font-bold text-gray-900">Atheres Atlas</span>
-                          {user?.companyName && (
-                            <span className="ml-2 text-xs text-gray-400">{user.companyName}</span>
-                          )}
+                          <span className="text-xl font-bold text-gray-900">Atlas Deliver</span>
                         </div>
                       </div>
 
@@ -140,6 +140,13 @@ export default function App() {
                     </div>
                   </div>
                 </header>
+
+                {/* Company selector bar */}
+                <div className="bg-gray-50 border-b border-gray-200">
+                  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2">
+                    <CompanyPicker />
+                  </div>
+                </div>
 
                 {/* Main content */}
                 <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6">

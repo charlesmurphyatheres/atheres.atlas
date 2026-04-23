@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { getOrderCommunications } from '../services/apiService'
 import type { CommunicationRecord, OrderStatus } from '../types'
 import { format } from 'date-fns'
+import { useSortedRows } from '../hooks/useSortedRows'
+import { SortHeader } from './ui/SortHeader'
 
 const STATUS_FILTERS: { value: OrderStatus | ''; label: string }[] = [
   { value: '', label: 'All' },
@@ -24,6 +26,14 @@ export default function CommunicationsDashboard() {
       .then((res) => { setRecords(res.items); setTotal(res.total) })
       .finally(() => setLoading(false))
   }, [page, statusFilter])
+
+  const { sorted: sortedRecords, sortKey, sortDir, toggle } = useSortedRows(records, {
+    accessors: {
+      emailSentTo:   (r) => r.confirmation?.emailSentTo ?? r.email,
+      emailSentAt:   (r) => r.confirmation?.emailSentAt,
+      respondedAt:   (r) => r.confirmation?.confirmedAt,
+    },
+  })
 
   const totalPages = Math.ceil(total / pageSize)
 
@@ -55,13 +65,18 @@ export default function CommunicationsDashboard() {
             <table className="w-full text-sm">
               <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
                 <tr>
-                  {['Store', 'Location', 'Email', 'Email Sent', 'ETA', 'Deadline', 'Status', 'Responded'].map((h) => (
-                    <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
-                  ))}
+                  <SortHeader label="Store"      sortKey="storeName"            activeKey={sortKey} dir={sortDir} onClick={() => toggle('storeName')} />
+                  <SortHeader label="Location"   sortKey="city"                 activeKey={sortKey} dir={sortDir} onClick={() => toggle('city')} />
+                  <SortHeader label="Email"      sortKey="emailSentTo"          activeKey={sortKey} dir={sortDir} onClick={() => toggle('emailSentTo')} />
+                  <SortHeader label="Email Sent" sortKey="emailSentAt"          activeKey={sortKey} dir={sortDir} onClick={() => toggle('emailSentAt')} />
+                  <SortHeader label="ETA"        sortKey="expectedDeliveryDate" activeKey={sortKey} dir={sortDir} onClick={() => toggle('expectedDeliveryDate')} />
+                  <SortHeader label="Deadline"   sortKey="confirmationDeadline" activeKey={sortKey} dir={sortDir} onClick={() => toggle('confirmationDeadline')} />
+                  <SortHeader label="Status"     sortKey="status"               activeKey={sortKey} dir={sortDir} onClick={() => toggle('status')} />
+                  <SortHeader label="Responded"  sortKey="respondedAt"          activeKey={sortKey} dir={sortDir} onClick={() => toggle('respondedAt')} />
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {records.map((r) => (
+                {sortedRecords.map((r) => (
                   <tr key={r.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium text-gray-900">{r.storeName}</td>
                     <td className="px-4 py-3 text-gray-600">{r.city}</td>
@@ -95,7 +110,7 @@ export default function CommunicationsDashboard() {
                     </td>
                   </tr>
                 ))}
-                {records.length === 0 && (
+                {sortedRecords.length === 0 && (
                   <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-400">No communications found.</td></tr>
                 )}
               </tbody>

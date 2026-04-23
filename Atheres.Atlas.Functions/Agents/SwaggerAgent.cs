@@ -58,7 +58,7 @@ public class SwaggerAgent
         <html lang="en">
         <head>
           <meta charset="UTF-8">
-          <title>Atheres Atlas API</title>
+          <title>Atlas Deliver API</title>
           <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
           <style>
             body { margin: 0; }

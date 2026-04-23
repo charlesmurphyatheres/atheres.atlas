@@ -4259,11 +4259,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "C:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj",
+      "projectUniqueName": "c:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj",
       "projectName": "Atheres.Atlas.Data",
-      "projectPath": "C:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj",
+      "projectPath": "c:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj",
       "packagesPath": "C:\\Users\\CharlesMurphy\\.nuget\\packages\\",
-      "outputPath": "C:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\obj\\",
+      "outputPath": "c:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
         "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages",
