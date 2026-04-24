@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "c:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj": {}
+    "C:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj": {}
   },
   "projects": {
-    "c:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj": {
+    "C:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "c:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj",
+        "projectUniqueName": "C:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj",
         "projectName": "Atheres.Atlas.Data",
-        "projectPath": "c:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj",
+        "projectPath": "C:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj",
         "packagesPath": "C:\\Users\\CharlesMurphy\\.nuget\\packages\\",
-        "outputPath": "c:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\obj\\",
+        "outputPath": "C:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages",

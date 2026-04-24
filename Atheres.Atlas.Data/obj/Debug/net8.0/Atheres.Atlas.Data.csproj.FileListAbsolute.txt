@@ -23,3 +23,4 @@ C:\development\Atheres.Atlas\Atheres.Atlas.Functions\bin\output\Atheres.Atlas.Da
 C:\development\Atheres.Atlas\Atheres.Atlas.Functions\bin\output\Atheres.Atlas.Data.runtimeconfig.json
 C:\development\Atheres.Atlas\Atheres.Atlas.Functions\bin\output\Atheres.Atlas.Data.dll
 C:\development\Atheres.Atlas\Atheres.Atlas.Functions\bin\output\Atheres.Atlas.Data.pdb
+C:\development\Atheres.Atlas\Atheres.Atlas.Data\obj\Debug\net8.0\Atheres.Atlas.Data.sourcelink.json

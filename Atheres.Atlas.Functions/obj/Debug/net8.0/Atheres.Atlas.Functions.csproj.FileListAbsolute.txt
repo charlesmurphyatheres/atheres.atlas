@@ -419,3 +419,4 @@ C:\development\Atheres.Atlas\Atheres.Atlas.Functions\bin\output\Atheres.Atlas.Do
 C:\development\Atheres.Atlas\Atheres.Atlas.Functions\bin\output\Atheres.Atlas.Data.pdb
 C:\development\Atheres.Atlas\Atheres.Atlas.Functions\bin\Debug\net8.0\swagger.json
 C:\development\Atheres.Atlas\Atheres.Atlas.Functions\bin\output\swagger.json
+C:\development\Atheres.Atlas\Atheres.Atlas.Functions\obj\Debug\net8.0\Atheres.Atlas.Functions.sourcelink.json

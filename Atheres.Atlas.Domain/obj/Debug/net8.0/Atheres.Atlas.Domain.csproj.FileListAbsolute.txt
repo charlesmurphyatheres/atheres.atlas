@@ -15,3 +15,4 @@ C:\development\Atheres.Atlas\Atheres.Atlas.Auth.Functions\bin\output\Atheres.Atl
 C:\development\Atheres.Atlas\Atheres.Atlas.Functions\bin\output\Atheres.Atlas.Domain.deps.json
 C:\development\Atheres.Atlas\Atheres.Atlas.Functions\bin\output\Atheres.Atlas.Domain.dll
 C:\development\Atheres.Atlas\Atheres.Atlas.Functions\bin\output\Atheres.Atlas.Domain.pdb
+C:\development\Atheres.Atlas\Atheres.Atlas.Domain\obj\Debug\net8.0\Atheres.Atlas.Domain.sourcelink.json

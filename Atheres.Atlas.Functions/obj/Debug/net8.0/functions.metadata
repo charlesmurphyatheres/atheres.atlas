@@ -593,7 +593,7 @@
         "name": "connectionInfo",
         "direction": "In",
         "type": "signalRConnectionInfo",
-        "hubName": "atlas-hub",
+        "hubName": "atlashub",
         "connectionStringSetting": "AzureSignalRConnectionString",
         "properties": {}
       },
@@ -625,7 +625,7 @@
         "name": "$return",
         "direction": "Out",
         "type": "signalR",
-        "hubName": "atlas-hub",
+        "hubName": "atlashub",
         "connectionStringSetting": "AzureSignalRConnectionString",
         "properties": {}
       }
@@ -644,7 +644,7 @@
         "name": "req",
         "direction": "In",
         "type": "httpTrigger",
-        "authLevel": "Function",
+        "authLevel": "Anonymous",
         "methods": [
           "post"
         ],

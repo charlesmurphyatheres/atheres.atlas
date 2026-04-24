@@ -7362,8 +7362,8 @@
         "net8.0": {
           "targetAlias": "net8.0",
           "projectReferences": {
-            "c:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj": {
-              "projectPath": "c:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj"
+            "C:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj": {
+              "projectPath": "C:\\development\\Atheres.Atlas\\Atheres.Atlas.Data\\Atheres.Atlas.Data.csproj"
             },
             "C:\\development\\Atheres.Atlas\\Atheres.Atlas.Domain\\Atheres.Atlas.Domain.csproj": {
               "projectPath": "C:\\development\\Atheres.Atlas\\Atheres.Atlas.Domain\\Atheres.Atlas.Domain.csproj"
