@@ -61,18 +61,46 @@ public class RouteOptimizationAgent
             true, null, DateTime.UtcNow), ct),
             "start audit event");
 
-        // Load hub (always the route origin and destination)
-        var hub = await _db.Hubs.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(h => h.Id == message.HubId, ct)
-            ?? throw new InvalidOperationException($"Hub {message.HubId} not found.");
+        // Resolve the route's origin and final destination. The route always
+        // begins and ends at the home hub of the assigned van — that is the
+        // physical depot the truck is based out of. The message's HubId is
+        // only used as a fallback for unassigned (TruckId == null) routes or
+        // for trucks whose HubId hasn't been set yet.
+        Guid effectiveHubId = message.HubId;
+        if (message.TruckId.HasValue)
+        {
+            var truck = await _db.Trucks.IgnoreQueryFilters()
+                .FirstOrDefaultAsync(t => t.Id == message.TruckId.Value, ct);
+            if (truck?.HubId is Guid truckHubId)
+            {
+                if (truckHubId != message.HubId)
+                {
+                    _logger.LogInformation(
+                        "Route {RouteRequestId}: using truck home hub {TruckHubId} as origin/destination instead of message hub {RequestedHubId}.",
+                        message.RouteRequestId, truckHubId, message.HubId);
+                }
+                effectiveHubId = truckHubId;
+            }
+        }
 
-        // Load truck settings for delivery window and confirmation deadline.
-        // If none are configured (routes now start/end at the hub, so the
-        // Settings UI only exposes window + deadline), fall back to the entity
-        // defaults — 08:00–17:00 delivery window, 3h confirmation deadline.
+        var hub = await _db.Hubs.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(h => h.Id == effectiveHubId, ct)
+            ?? throw new InvalidOperationException($"Hub {effectiveHubId} not found.");
+
+        // Load the company so we can read company-wide delivery window. The
+        // window is a company-level policy (not per-truck), so a missing
+        // company would mean a malformed request — fall back to defaults.
+        var company = await _db.Companies.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(c => c.Id == message.CompanyId, ct);
+
+        // Load truck settings for confirmation deadline + per-stop wait. If
+        // none are configured for this truck, fall back to the entity
+        // defaults (3h confirmation deadline, 0min wait).
         var settingsKey = message.TruckId?.ToString() ?? "default";
         var userSettings = await _settings.GetByUserIdAsync(settingsKey, ct)
                            ?? new UserRouteSettings { UserId = settingsKey, CompanyId = message.CompanyId };
+
+        var deliveryWindowStart = company?.DeliveryWindowStart ?? new TimeSpan(8, 0, 0);
 
         // Load warehouse if specified (it becomes the first waypoint for pickup)
         Warehouse? warehouse = null;
@@ -133,7 +161,7 @@ public class RouteOptimizationAgent
         }
 
         // Build delivery times starting from window start
-        var deliveryStart = message.DeliveryDate.Date.Add(userSettings.DeliveryWindowStart);
+        var deliveryStart = message.DeliveryDate.Date.Add(deliveryWindowStart);
         var runningTime = deliveryStart;
 
         // Create the route entity (hub is always start and end)
@@ -142,7 +170,7 @@ public class RouteOptimizationAgent
             Id = message.RouteRequestId,
             CompanyId = message.CompanyId,
             TruckId = message.TruckId,
-            HubId = message.HubId,
+            HubId = effectiveHubId,
             WarehouseId = message.WarehouseId,
             DeliveryDate = message.DeliveryDate,
             StartAddress = hubAddress,
@@ -222,8 +250,15 @@ public class RouteOptimizationAgent
 
             await _orders.UpdateAsync(order, ct);
 
-            // Add service time to running total
-            runningTime = estimatedArrival.AddMinutes(stop.ServiceTimeMinutes);
+            // Add service time + per-stop wait to running total. The wait
+            // applies only to delivery stops in this loop — the route's
+            // initial start and final return to the home hub are stored on
+            // DeliveryRoute itself (not as RouteStop rows) so they never
+            // pass through here, which matches the requirement that wait
+            // does not apply to depot bookends.
+            runningTime = estimatedArrival
+                .AddMinutes(stop.ServiceTimeMinutes)
+                .AddMinutes(userSettings.WaitMinutesPerStop);
 
             // Queue confirmation request
             var confirmation = new DeliveryConfirmation

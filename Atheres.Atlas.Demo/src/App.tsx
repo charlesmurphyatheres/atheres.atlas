@@ -116,9 +116,26 @@ export default function App() {
         <Select label="Warehouse" value={warehouse} onChange={setWarehouse} disabled={!company}
           options={warehouses.filter((w) => w.licenseNumber).map((w) => ({ value: w.id, label: w.businessName }))} placeholder="Select..." />
 
-        {/* Store */}
-        <Select label="Store" value={store} onChange={setStore} disabled={!company}
-          options={[{ value: '', label: 'Random' }, ...stores.map((s) => ({ value: s.id, label: `${s.name} - ${s.city}` }))]} />
+        {/* Store — labelled "Customer (Name)" so brand + specific dispensary
+            are both visible and rows like "Nirvana - Lake Zurich" vs.
+            "Nirvana - Mt. Carmel" are easy to distinguish. Sorted by Customer
+            then Name so brands group together in the dropdown. */}
+        <Select
+          label="Store"
+          value={store}
+          onChange={setStore}
+          disabled={!company}
+          options={[
+            { value: '', label: 'Random' },
+            ...[...stores]
+              .sort((a, b) =>
+                a.customer.localeCompare(b.customer) || a.name.localeCompare(b.name))
+              .map((s) => ({
+                value: s.id,
+                label: `${s.customer} (${s.name})`,
+              })),
+          ]}
+        />
 
         {/* Count */}
         <div>

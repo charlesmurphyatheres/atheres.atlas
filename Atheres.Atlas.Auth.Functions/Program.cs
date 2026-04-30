@@ -200,11 +200,13 @@ static async Task SeedAsync(IServiceProvider services)
 
     users.AddRange(new[]
     {
-        new SeedUser("ken@atheres.com",      "Phone@3313059708",  "Ken",    "Administrator", null,              Roles.SuperAdmin),
-        new SeedUser("secure@gmail.com",     "Secure@1234567890", "Secure", "Admin",         secureTransportId, Roles.Admin),
-        new SeedUser("secureuser@gmail.com", "Secure@1234567890", "Secure", "User",          secureTransportId, Roles.Driver),
-        new SeedUser("demo@atheres.com",     "Phone@3464978286",  "Demo",   "Admin",         demoCompanyId,     Roles.Admin),
-        new SeedUser("demouser@atheres.com", "Phone@3464978286",  "Demo",   "User",          demoCompanyId,     Roles.Driver),
+        new SeedUser("ken@atheres.com",          "Phone@3313059708",  "Ken",    "Administrator", null,              Roles.SuperAdmin),
+        new SeedUser("secure@gmail.com",         "Secure@1234567890", "Secure", "Admin",         secureTransportId, Roles.Admin),
+        new SeedUser("secureuser@gmail.com",     "Secure@1234567890", "Secure", "User",          secureTransportId, Roles.Driver),
+        new SeedUser("securedatauser@gmail.com", "Secure@123457890",  "Secure", "Data",          secureTransportId, Roles.OrderImporter),
+        new SeedUser("demo@atheres.com",         "Phone@3464978286",  "Demo",   "Admin",         demoCompanyId,     Roles.Admin),
+        new SeedUser("demouser@atheres.com",     "Phone@3464978286",  "Demo",   "User",          demoCompanyId,     Roles.Driver),
+        new SeedUser("demodatauser@atheres.com", "Phone@3464978286",  "Demo",   "Data",          demoCompanyId,     Roles.OrderImporter),
     });
 
     foreach (var u in users)

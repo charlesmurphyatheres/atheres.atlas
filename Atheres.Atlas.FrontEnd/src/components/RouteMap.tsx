@@ -46,15 +46,32 @@ export default function RouteMap() {
       {/* Route summary cards */}
       {routes.length > 0 && (
         <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-          {routes.map((r) => (
-            <div key={r.id} className="bg-white rounded-lg border border-gray-200 p-4 text-sm">
-              <div className="font-medium text-gray-800">{r.totalStops} stops</div>
-              <div className="text-gray-500 mt-1">
-                {r.totalDistanceMiles.toFixed(1)} mi · {r.totalDuration}
+          {routes.map((r) => {
+            const sameDepot =
+              r.startAddress === r.endAddress &&
+              r.startLatitude === r.endLatitude &&
+              r.startLongitude === r.endLongitude
+            return (
+              <div key={r.id} className="bg-white rounded-lg border border-gray-200 p-4 text-sm">
+                <div className="font-medium text-gray-800">{r.totalStops} stops</div>
+                <div className="text-gray-500 mt-1">
+                  {r.totalDistanceMiles.toFixed(1)} mi · {r.totalDuration}
+                </div>
+                <div className="mt-2 space-y-1 text-xs">
+                  <div className="flex items-start gap-1.5 text-gray-600">
+                    <span className="inline-block w-4 h-4 rounded bg-emerald-500 text-white text-[9px] font-bold flex-shrink-0 flex items-center justify-center mt-0.5">S</span>
+                    <span className="truncate">{r.startAddress}</span>
+                  </div>
+                  <div className="flex items-start gap-1.5 text-gray-600">
+                    <span className="inline-block w-4 h-4 rounded bg-rose-500 text-white text-[9px] font-bold flex-shrink-0 flex items-center justify-center mt-0.5">E</span>
+                    <span className="truncate">
+                      {sameDepot ? <em className="not-italic text-gray-400">returns to start</em> : r.endAddress}
+                    </span>
+                  </div>
+                </div>
               </div>
-              <div className="text-gray-400 text-xs mt-1 truncate">{r.startAddress}</div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
 
@@ -62,6 +79,51 @@ export default function RouteMap() {
       <div className="rounded-xl border border-gray-200 overflow-hidden">
         {isLoaded ? (
           <GoogleMap mapContainerStyle={mapContainerStyle} center={defaultCenter} zoom={11}>
+            {/* Depot markers: green "S" for the start of each route, red "E"
+                for its end (same coords when the route returns to the home hub).
+                Square shape distinguishes them from the round numbered stop pins. */}
+            {routes.flatMap((r) => {
+              const sameDepot =
+                r.startLatitude === r.endLatitude && r.startLongitude === r.endLongitude
+              const markers = [
+                <Marker
+                  key={`${r.id}-start`}
+                  position={{ lat: r.startLatitude, lng: r.startLongitude }}
+                  label={{ text: 'S', color: 'white', fontWeight: 'bold', fontSize: '12px' }}
+                  icon={{
+                    path: 'M -12,-12 12,-12 12,12 -12,12 z',
+                    fillColor: '#10b981',
+                    fillOpacity: 1,
+                    strokeColor: '#047857',
+                    strokeWeight: 2,
+                    scale: 1,
+                  }}
+                  title={`Route ${r.id.slice(0, 8)} · Start: ${r.startAddress}`}
+                  zIndex={1000}
+                />,
+              ]
+              if (!sameDepot) {
+                markers.push(
+                  <Marker
+                    key={`${r.id}-end`}
+                    position={{ lat: r.endLatitude, lng: r.endLongitude }}
+                    label={{ text: 'E', color: 'white', fontWeight: 'bold', fontSize: '12px' }}
+                    icon={{
+                      path: 'M -12,-12 12,-12 12,12 -12,12 z',
+                      fillColor: '#f43f5e',
+                      fillOpacity: 1,
+                      strokeColor: '#9f1239',
+                      strokeWeight: 2,
+                      scale: 1,
+                    }}
+                    title={`Route ${r.id.slice(0, 8)} · End: ${r.endAddress}`}
+                    zIndex={1000}
+                  />
+                )
+              }
+              return markers
+            })}
+
             {allStops.map((stop) => (
               <Marker
                 key={stop.orderId}

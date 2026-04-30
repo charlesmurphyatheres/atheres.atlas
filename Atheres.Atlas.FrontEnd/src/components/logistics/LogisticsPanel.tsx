@@ -181,6 +181,13 @@ function StopEditor({ route, onUpdate }: { route: Route; onUpdate: (r: Route) =>
     Expired: 'bg-red-50 text-red-400',
   }
 
+  // Routes always begin and end at the van's home hub. Render those as
+  // depot bookends so the trip arc (depot → stops → depot) is unmistakable.
+  const sameDepot =
+    route.startAddress === route.endAddress &&
+    route.startLatitude === route.endLatitude &&
+    route.startLongitude === route.endLongitude
+
   return (
     <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
       <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
@@ -192,6 +199,9 @@ function StopEditor({ route, onUpdate }: { route: Route; onUpdate: (r: Route) =>
       </div>
 
       <div className="divide-y divide-gray-50">
+        {/* Start (depot origin) */}
+        <DepotRow kind="start" address={route.startAddress} />
+
         {stops.map((stop, i) => (
           <div key={stop.orderId} className="px-5 py-3.5 flex items-center gap-4">
             {/* Sequence number + reorder */}
@@ -240,6 +250,45 @@ function StopEditor({ route, onUpdate }: { route: Route; onUpdate: (r: Route) =>
             </div>
           </div>
         ))}
+
+        {/* End (depot return) */}
+        <DepotRow
+          kind="end"
+          address={route.endAddress}
+          subtitle={sameDepot ? 'Return to start hub' : undefined}
+        />
+      </div>
+    </div>
+  )
+}
+
+// ---- Depot Row (route start / end bookend) ----
+
+function DepotRow({ kind, address, subtitle }: {
+  kind: 'start' | 'end'
+  address: string
+  subtitle?: string
+}) {
+  const isStart = kind === 'start'
+  const label = isStart ? 'Start' : 'End'
+  // Filled square (vs. round numbered chip on stops) so depot reads at a glance.
+  const chipColor = isStart ? 'bg-emerald-500' : 'bg-rose-500'
+  const labelColor = isStart ? 'text-emerald-700' : 'text-rose-700'
+  const bgTint = isStart ? 'bg-emerald-50/40' : 'bg-rose-50/40'
+
+  return (
+    <div className={`px-5 py-3.5 flex items-center gap-4 ${bgTint}`}>
+      <div className="flex flex-col items-center gap-0.5 shrink-0 w-7">
+        <span className={`w-7 h-7 rounded-md ${chipColor} text-white text-[10px] font-bold flex items-center justify-center uppercase tracking-wide`}>
+          {isStart ? 'S' : 'E'}
+        </span>
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className={`text-sm font-semibold ${labelColor}`}>
+          {label} · Depot
+        </p>
+        <p className="text-xs text-gray-600 truncate">{address}</p>
+        {subtitle && <p className="text-[11px] text-gray-400 mt-0.5">{subtitle}</p>}
       </div>
     </div>
   )

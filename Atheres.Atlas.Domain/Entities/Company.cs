@@ -14,6 +14,24 @@ public class Company
     public DateTime CreatedAt  { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt  { get; set; } = DateTime.UtcNow;
 
+    // ---- Company-wide routing policies -----------------------------------
+    // These values are policy decisions made at the company level (operating
+    // hours, dispatch ceiling) rather than per-truck preferences. The Settings
+    // page edits them via the company-scoped settings endpoint.
+
+    /// <summary>Earliest time of day deliveries may be scheduled. Defaults to 08:00.</summary>
+    public TimeSpan DeliveryWindowStart { get; set; } = new TimeSpan(8, 0, 0);
+
+    /// <summary>Latest time of day deliveries may be scheduled. Defaults to 17:00.</summary>
+    public TimeSpan DeliveryWindowEnd   { get; set; } = new TimeSpan(17, 0, 0);
+
+    /// <summary>
+    /// Hard cap on the number of delivery stops per route. The optimizer
+    /// chunks ready orders into batches no larger than this. Server clamps
+    /// the value to <see cref="UserRouteSettings.MaxStopsHardCap"/>.
+    /// </summary>
+    public int MaxStopsPerRoute { get; set; } = UserRouteSettings.DefaultMaxStops;
+
     // Navigation
     public ICollection<Truck>            Trucks         { get; set; } = [];
     public ICollection<Hub>              Hubs           { get; set; } = [];

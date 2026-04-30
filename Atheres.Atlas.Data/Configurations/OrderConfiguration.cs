@@ -21,6 +21,9 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
         builder.Property(o => o.LicenseNumber).HasMaxLength(100);
         builder.Property(o => o.District).HasMaxLength(100);
         builder.Property(o => o.Zone).HasMaxLength(100);
+        builder.Property(o => o.Customer).HasMaxLength(200);
+        builder.Property(o => o.SalesOrderNumber).HasMaxLength(100);
+        builder.Property(o => o.PurchaseOrderNumber).HasMaxLength(100);
         builder.Property(o => o.Email).IsRequired().HasMaxLength(254);
         builder.Property(o => o.Phone).HasMaxLength(30);
         builder.Property(o => o.FormattedAddress).HasMaxLength(500);

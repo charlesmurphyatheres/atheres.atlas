@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { getUsers, registerUser, deactivateUser, getOrders, updateOrderStatus, getRoutes, getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse, getHubs, createHub, updateHub, deleteHub, getTrucks, createTruck, updateTruck, deleteTruck } from '../../services/apiService'
+import { TRUCK_STATUSES, type TruckStatus } from '../../types'
 import { useSortedRows } from '../../hooks/useSortedRows'
 import { SortHeader } from '../ui/SortHeader'
 import type { AppUser, Order, Route, Role, Warehouse, Hub, Truck } from '../../types'
@@ -271,6 +272,7 @@ function UsersTab() {
     Admin: 'bg-blue-100 text-blue-700',
     Logistics: 'bg-yellow-100 text-yellow-700',
     Driver: 'bg-green-100 text-green-700',
+    OrderImporter: 'bg-pink-100 text-pink-700',
   }
 
   return (
@@ -312,7 +314,9 @@ function UsersTab() {
               <label className="block text-xs font-medium text-gray-600 mb-1">Role</label>
               <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as Role })}
                 className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400">
-                {(isRole('SuperAdmin') ? ['Admin', 'Logistics', 'Driver'] : ['Logistics', 'Driver']).map((r) => (
+                {(isRole('SuperAdmin')
+                    ? ['Admin', 'Logistics', 'Driver', 'OrderImporter']
+                    : ['Logistics', 'Driver', 'OrderImporter']).map((r) => (
                   <option key={r} value={r}>{r}</option>
                 ))}
               </select>
@@ -567,6 +571,22 @@ function VansTab() {
     setTrucks((prev) => prev.filter((t) => t.id !== id))
   }
 
+  // Optimistic inline status update from the grid. We patch local state
+  // first so the dropdown reflects the change immediately, then revert on
+  // error so the user sees the rollback rather than a stale optimistic value.
+  async function handleStatusChange(id: string, newStatus: TruckStatus) {
+    const previous = trucks.find((t) => t.id === id)?.status
+    setTrucks((prev) => prev.map((t) => (t.id === id ? { ...t, status: newStatus } : t)))
+    try {
+      await updateTruck(id, { status: newStatus })
+    } catch {
+      if (previous) {
+        setTrucks((prev) => prev.map((t) => (t.id === id ? { ...t, status: previous } : t)))
+      }
+      alert('Failed to update van status.')
+    }
+  }
+
   if (loading) return <div className="flex items-center justify-center h-40 text-gray-400">Loading...</div>
 
   return (
@@ -624,6 +644,7 @@ function VansTab() {
               <SortHeader label="License Plate"    sortKey="licensePlate"           activeKey={sortKey} dir={sortDir} onClick={() => toggle('licensePlate')} />
               <SortHeader label="Hub"              sortKey="hubName"                activeKey={sortKey} dir={sortDir} onClick={() => toggle('hubName')} />
               <SortHeader label="Current Location" sortKey="currentLocationAddress" activeKey={sortKey} dir={sortDir} onClick={() => toggle('currentLocationAddress')} />
+              <SortHeader label="Status"           sortKey="status"                 activeKey={sortKey} dir={sortDir} onClick={() => toggle('status')} />
               <th className="px-4 py-3 text-left font-medium"></th>
             </tr>
           </thead>
@@ -643,6 +664,12 @@ function VansTab() {
                     : <span className="text-xs text-gray-400">—</span>}
                 </td>
                 <td className="px-4 py-3">
+                  <TruckStatusSelect
+                    value={t.status}
+                    onChange={(s) => handleStatusChange(t.id, s)}
+                  />
+                </td>
+                <td className="px-4 py-3">
                   <div className="flex gap-2">
                     <button onClick={() => startEdit(t)} className="text-xs text-brand-600 hover:text-brand-800">Edit</button>
                     <button onClick={() => handleDeactivate(t.id)} className="text-xs text-red-500 hover:text-red-700">Deactivate</button>
@@ -651,12 +678,46 @@ function VansTab() {
               </tr>
             ))}
             {sortedTrucks.length === 0 && (
-              <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-400">No vans found.</td></tr>
+              <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-400">No vans found.</td></tr>
             )}
           </tbody>
         </table>
       </div>
     </div>
+  )
+}
+
+// ---- Truck Status Select (inline, color-coded) ----
+
+const TRUCK_STATUS_LABELS: Record<TruckStatus, string> = {
+  Available: 'Available',
+  AvailableWithIssues: 'Available · Issues',
+  Unavailable: 'Unavailable',
+}
+
+const TRUCK_STATUS_COLORS: Record<TruckStatus, string> = {
+  Available:           'bg-green-50 text-green-700  border-green-200  hover:border-green-400',
+  AvailableWithIssues: 'bg-amber-50 text-amber-700  border-amber-200  hover:border-amber-400',
+  Unavailable:         'bg-red-50   text-red-700    border-red-200    hover:border-red-400',
+}
+
+function TruckStatusSelect({ value, onChange }: {
+  value: TruckStatus
+  onChange: (next: TruckStatus) => void
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => {
+        const next = e.target.value as TruckStatus
+        if (next !== value) onChange(next)
+      }}
+      className={`text-xs font-medium px-2 py-1 rounded-md border focus:outline-none focus:ring-2 focus:ring-brand-300 transition-colors cursor-pointer ${TRUCK_STATUS_COLORS[value]}`}
+    >
+      {TRUCK_STATUSES.map((s) => (
+        <option key={s} value={s}>{TRUCK_STATUS_LABELS[s]}</option>
+      ))}
+    </select>
   )
 }
 

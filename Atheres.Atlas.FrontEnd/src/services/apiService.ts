@@ -78,6 +78,27 @@ export async function ingestOrders(orders: unknown[]): Promise<{ accepted: numbe
   return data
 }
 
+// ---- Order Import (CSV) ----
+
+export interface ImportedOrderRow {
+  storeId: string
+  orderDate?: string
+  customer?: string
+  salesOrderNumber?: string
+  purchaseOrderNumber?: string
+}
+
+export interface ImportOrdersResult {
+  created: number
+  orderIds: string[]
+  errors: { row: number; message: string }[]
+}
+
+export async function importOrders(rows: ImportedOrderRow[]): Promise<ImportOrdersResult> {
+  const { data } = await api.post<ImportOrdersResult>('/orders/import', { rows })
+  return data
+}
+
 export async function updateOrderStatus(id: string, status: string): Promise<void> {
   await api.patch(`/orders/${id}/status`, { status })
 }
@@ -166,8 +187,34 @@ export async function deleteTruck(id: string): Promise<void> {
 
 // ---- Stores ----
 
-export async function getStores(): Promise<{ id: string; name: string; licenseNumber: string; customer: string; city: string }[]> {
-  const { data } = await api.get('/stores')
+export interface StoreLite {
+  id: string
+  name: string
+  licenseNumber: string
+  customer: string
+  city: string
+}
+
+export async function getStores(): Promise<StoreLite[]> {
+  const { data } = await api.get<StoreLite[]>('/stores')
+  return data
+}
+
+export interface CreateStorePayload {
+  name: string
+  licenseNumber: string
+  address: string
+  customer?: string
+  city?: string
+  state?: string
+  zip?: string
+  county?: string
+  email?: string
+  phone?: string
+}
+
+export async function createStore(payload: CreateStorePayload): Promise<StoreLite> {
+  const { data } = await api.post<StoreLite>('/stores', payload)
   return data
 }
 

@@ -21,10 +21,9 @@ public class UserSettingsRepository : IUserSettingsRepository
         }
         else
         {
-            existing.DeliveryWindowStart = settings.DeliveryWindowStart;
-            existing.DeliveryWindowEnd = settings.DeliveryWindowEnd;
             existing.ConfirmationDeadlineHours = settings.ConfirmationDeadlineHours;
-            existing.UpdatedAt = DateTime.UtcNow;
+            existing.WaitMinutesPerStop        = settings.WaitMinutesPerStop;
+            existing.UpdatedAt                 = DateTime.UtcNow;
             _db.UserRouteSettings.Update(existing);
         }
     }

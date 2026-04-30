@@ -1,3 +1,5 @@
+using Atheres.Atlas.Domain.Enums;
+
 namespace Atheres.Atlas.Domain.Entities;
 
 /// <summary>
@@ -28,6 +30,14 @@ public class Truck
 
     /// <summary>FK to UserRouteSettings — depot and delivery window for this truck.</summary>
     public Guid? RouteSettingsId { get; set; }
+
+    /// <summary>
+    /// Operational readiness. Assignment prefers <see cref="TruckStatus.Available"/>
+    /// trucks; falls back to <see cref="TruckStatus.AvailableWithIssues"/> only
+    /// when Available is exhausted; never uses <see cref="TruckStatus.Unavailable"/>.
+    /// Soft-deleted trucks are still represented by IsActive=false.
+    /// </summary>
+    public TruckStatus Status { get; set; } = TruckStatus.Available;
 
     public bool IsActive    { get; set; } = true;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

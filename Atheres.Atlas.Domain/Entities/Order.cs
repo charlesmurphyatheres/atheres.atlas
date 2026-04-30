@@ -25,6 +25,14 @@ public class Order
     public string Email { get; set; } = string.Empty;
     public string? Phone { get; set; }
 
+    // CSV-import fields. Populated when an order is created without an
+    // upstream warehouse system (Sales Order #, Customer name, Purchase
+    // Order #) so the row can be reconciled later when product details
+    // arrive.
+    public string? Customer { get; set; }
+    public string? SalesOrderNumber { get; set; }
+    public string? PurchaseOrderNumber { get; set; }
+
     // Geocoded coordinates (populated from Store on ingestion)
     public double? Latitude { get; set; }
     public double? Longitude { get; set; }

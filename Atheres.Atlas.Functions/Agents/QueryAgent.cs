@@ -209,9 +209,14 @@ public class QueryAgent
         r.Id,
         r.CompanyId,
         r.TruckId,
+        r.HubId,
         r.DeliveryDate,
         r.StartAddress,
+        r.StartLatitude,
+        r.StartLongitude,
         r.EndAddress,
+        r.EndLatitude,
+        r.EndLongitude,
         r.TotalStops,
         r.TotalDistanceMiles,
         totalDuration = r.TotalDuration.ToString(@"h\:mm"),
@@ -381,8 +386,10 @@ public class QueryAgent
         // without a warehouse land in a null group that has no pickup stop.
         // Google Directions caps waypoints at 25 per request (one reserved for
         // the warehouse pickup stop when present), so each warehouse group is
-        // further chunked into sub-groups that fit inside the limit.
-        const int MaxStopsPerRoute = 25;
+        // further chunked into sub-groups that fit inside the limit. The cap
+        // is set on the Company row — this is a company-wide policy.
+        const int GoogleDirectionsHardCap = 25;
+        var maxStopsPerRoute = Math.Clamp(company.MaxStopsPerRoute, 1, GoogleDirectionsHardCap);
         var groups = orders.GroupBy(o => o.WarehouseId).ToList();
 
         foreach (var order in orders)
@@ -403,7 +410,9 @@ public class QueryAgent
         foreach (var group in groups)
         {
             var pickupSlot = group.Key.HasValue ? 1 : 0;
-            var chunkSize = MaxStopsPerRoute - pickupSlot;
+            // Subtract the pickup waypoint when there is one so the actual
+            // delivery count never exceeds the configured per-route cap.
+            var chunkSize = Math.Max(1, maxStopsPerRoute - pickupSlot);
             var orderedIds = group.Select(o => o.Id).ToList();
             for (int i = 0; i < orderedIds.Count; i += chunkSize)
             {
@@ -464,8 +473,17 @@ public class QueryAgent
         string userId,
         CancellationToken ct)
     {
+        // Company-wide policy (delivery window, max stops) lives on Company;
+        // per-truck/user prefs (confirmation deadline, wait minutes) live on
+        // UserRouteSettings. The Settings page edits both via this endpoint.
+        var companyId = _companyContext.CompanyId;
+        var company = companyId.HasValue
+            ? await _db.Companies.IgnoreQueryFilters()
+                .FirstOrDefaultAsync(c => c.Id == companyId.Value, ct)
+            : null;
+
         var s = await _settings.GetByUserIdAsync(userId, ct);
-        if (s is null)
+        if (s is null && company is null)
         {
             return new OkObjectResult(new
             {
@@ -473,15 +491,22 @@ public class QueryAgent
                 deliveryWindowStart = "08:00:00",
                 deliveryWindowEnd   = "17:00:00",
                 confirmationDeadlineHours = 3,
+                maxStopsPerRoute    = Domain.Entities.UserRouteSettings.DefaultMaxStops,
+                waitMinutesPerStop  = 0,
             });
         }
 
         return new OkObjectResult(new
         {
-            userId = s.UserId,
-            deliveryWindowStart = s.DeliveryWindowStart.ToString(@"hh\:mm\:ss"),
-            deliveryWindowEnd   = s.DeliveryWindowEnd.ToString(@"hh\:mm\:ss"),
-            s.ConfirmationDeadlineHours,
+            userId = s?.UserId ?? userId,
+            deliveryWindowStart = (company?.DeliveryWindowStart ?? new TimeSpan(8, 0, 0))
+                .ToString(@"hh\:mm\:ss"),
+            deliveryWindowEnd   = (company?.DeliveryWindowEnd   ?? new TimeSpan(17, 0, 0))
+                .ToString(@"hh\:mm\:ss"),
+            confirmationDeadlineHours = s?.ConfirmationDeadlineHours ?? 3,
+            maxStopsPerRoute    = company?.MaxStopsPerRoute
+                                  ?? Domain.Entities.UserRouteSettings.DefaultMaxStops,
+            waitMinutesPerStop  = s?.WaitMinutesPerStop ?? 0,
         });
     }
 
@@ -507,19 +532,38 @@ public class QueryAgent
         var existing = await _settings.GetByUserIdAsync(userId, ct)
             ?? new Domain.Entities.UserRouteSettings { UserId = userId, CompanyId = companyId.Value };
 
+        // Company-wide policy fields are persisted to the Companies row, so
+        // they're shared by every truck in the company. Filtered by company
+        // context already because companyId came from the request scope.
+        var company = await _db.Companies.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(c => c.Id == companyId.Value, ct);
+        if (company is null)
+            return new BadRequestObjectResult(new { error = "Company not found." });
+
         string? Str(string key) =>
             doc.RootElement.TryGetProperty(key, out var v) ? v.GetString() : null;
         int? Int(string key) =>
             doc.RootElement.TryGetProperty(key, out var v) && v.TryGetInt32(out var i) ? i : null;
 
+        // ---- Company-scoped fields ----
         if (Str("deliveryWindowStart") is { } ws && TimeSpan.TryParse(ws, out var wsts))
-            existing.DeliveryWindowStart = wsts;
+            company.DeliveryWindowStart = wsts;
         if (Str("deliveryWindowEnd") is { } we && TimeSpan.TryParse(we, out var wets))
-            existing.DeliveryWindowEnd = wets;
+            company.DeliveryWindowEnd = wets;
+        // Clamp at the hard cap server-side: the UI also enforces it, but a
+        // raw API caller could try to bypass the input validation.
+        if (Int("maxStopsPerRoute") is { } maxStops)
+            company.MaxStopsPerRoute = Math.Clamp(maxStops, 1,
+                Domain.Entities.UserRouteSettings.MaxStopsHardCap);
+
+        // ---- Per-truck / per-user fields ----
         if (Int("confirmationDeadlineHours") is { } h)
             existing.ConfirmationDeadlineHours = h;
+        if (Int("waitMinutesPerStop") is { } wait)
+            existing.WaitMinutesPerStop = Math.Max(0, wait);
 
         existing.UpdatedAt = DateTime.UtcNow;
+        company.UpdatedAt  = DateTime.UtcNow;
 
         await _settings.UpsertAsync(existing, ct);
         await _settings.SaveChangesAsync(ct);

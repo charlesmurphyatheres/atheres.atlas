@@ -73,6 +73,7 @@ public class ManagementAgent
                 t.CurrentLocationLongitude,
                 t.CurrentLocationUpdatedAt,
                 t.AssignedDriverId,
+                status = t.Status.ToString(),
                 t.IsActive,
             })
             .ToListAsync(ct);
@@ -183,6 +184,30 @@ public class ManagementAgent
             truck.AssignedDriverId = d.GetString();
         if (doc.RootElement.TryGetProperty("currentLocationAddress", out var loc))
             await ApplyCurrentLocationAsync(truck, loc.GetString(), ct);
+        // Accept Status as either the enum name ("Available") or its underlying
+        // int (0/1/2) so the admin grid's dropdown and any TestBed scripts can
+        // both update it.
+        if (doc.RootElement.TryGetProperty("status", out var st))
+        {
+            if (st.ValueKind == JsonValueKind.String
+                && Enum.TryParse<TruckStatus>(st.GetString(), ignoreCase: true, out var statusByName))
+            {
+                truck.Status = statusByName;
+            }
+            else if (st.ValueKind == JsonValueKind.Number
+                && st.TryGetInt32(out var statusInt)
+                && Enum.IsDefined(typeof(TruckStatus), statusInt))
+            {
+                truck.Status = (TruckStatus)statusInt;
+            }
+            else
+            {
+                return new BadRequestObjectResult(new
+                {
+                    error = "Invalid status. Expected one of: Available, AvailableWithIssues, Unavailable.",
+                });
+            }
+        }
 
         truck.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct);

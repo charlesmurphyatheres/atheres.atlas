@@ -77,8 +77,13 @@ export interface Route {
   id: string
   deliveryDate: string
   warehouseId?: string
+  hubId?: string
   startAddress: string
+  startLatitude: number
+  startLongitude: number
   endAddress: string
+  endLatitude: number
+  endLongitude: number
   totalStops: number
   totalDistanceMiles: number
   totalDuration: string
@@ -103,7 +108,15 @@ export interface UserRouteSettings {
   deliveryWindowStart: string
   deliveryWindowEnd: string
   confirmationDeadlineHours: number
+  maxStopsPerRoute: number
+  waitMinutesPerStop: number
 }
+
+/** Server-enforced ceiling on UserRouteSettings.maxStopsPerRoute. */
+export const MAX_STOPS_HARD_CAP = 20
+
+/** Default UserRouteSettings.maxStopsPerRoute applied to new rows. */
+export const DEFAULT_MAX_STOPS = 12
 
 export interface PagedResult<T> {
   items: T[]
@@ -114,7 +127,7 @@ export interface PagedResult<T> {
 
 // ---- Auth ----
 
-export type Role = 'SuperAdmin' | 'Admin' | 'Logistics' | 'Driver'
+export type Role = 'SuperAdmin' | 'Admin' | 'Logistics' | 'Driver' | 'OrderImporter'
 
 export interface AuthUser {
   userId: string
@@ -203,6 +216,14 @@ export interface OrderBatch {
   createdAt: string
 }
 
+export type TruckStatus = 'Available' | 'AvailableWithIssues' | 'Unavailable'
+
+export const TRUCK_STATUSES: readonly TruckStatus[] = [
+  'Available',
+  'AvailableWithIssues',
+  'Unavailable',
+] as const
+
 export interface Truck {
   id: string
   companyId: string
@@ -215,6 +236,7 @@ export interface Truck {
   currentLocationLongitude?: number | null
   currentLocationUpdatedAt?: string | null
   assignedDriverId?: string
+  status: TruckStatus
   isActive: boolean
 }
 

@@ -9,6 +9,7 @@ import NotificationPanel from './components/NotificationPanel'
 import LoginPage from './components/auth/LoginPage'
 import ProtectedRoute from './components/ProtectedRoute'
 import AdminPanel from './components/admin/AdminPanel'
+import OrderImportPanel from './components/import/OrderImportPanel'
 import LogisticsPanel from './components/logistics/LogisticsPanel'
 import CommunicationsDashboard from './components/CommunicationsDashboard'
 import DriverPanel from './components/driver/DriverPanel'
@@ -63,6 +64,11 @@ export default function App() {
   const isAdmin = user?.roles.some((r) => r === 'Admin' || r === 'SuperAdmin')
   const isLogistics = user?.roles.some((r) => r === 'Logistics')
   const isDriver = user?.roles.includes('Driver') && !isAdmin && !isLogistics
+  // Order importers are intentionally narrow: their account exists only to
+  // upload CSVs, so they don't see Dashboard / Orders / Routes / Admin nav
+  // and the root route renders the import panel directly. We treat the role
+  // as a single-purpose login the same way Driver is treated.
+  const isImporter = user?.roles.includes('OrderImporter') && !isAdmin && !isLogistics && !isDriver
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -100,8 +106,8 @@ export default function App() {
                       </div>
 
                       <nav className="flex items-center gap-1">
-                        {/* Shared */}
-                        {!isDriver && (
+                        {/* Shared (everyone except single-purpose roles) */}
+                        {!isDriver && !isImporter && (
                           <>
                             <NavLink to="/" end className={navLinkClass}>Dashboard</NavLink>
                             <NavLink to="/orders" className={navLinkClass}>Orders</NavLink>
@@ -111,7 +117,10 @@ export default function App() {
                         )}
                         {/* Admin-only */}
                         {isAdmin && (
-                          <NavLink to="/admin" className={navLinkClass}>Admin</NavLink>
+                          <>
+                            <NavLink to="/admin" className={navLinkClass}>Admin</NavLink>
+                            <NavLink to="/import" className={navLinkClass}>Import</NavLink>
+                          </>
                         )}
                         {/* Logistics */}
                         {(isLogistics || isAdmin) && (
@@ -120,6 +129,10 @@ export default function App() {
                         {/* Driver */}
                         {isDriver && (
                           <NavLink to="/driver" className={navLinkClass}>My Route</NavLink>
+                        )}
+                        {/* Importer-only single landing page */}
+                        {isImporter && (
+                          <NavLink to="/import" className={navLinkClass}>Import Orders</NavLink>
                         )}
                         {isAdmin && (
                           <NavLink to="/settings" className={navLinkClass}>Settings</NavLink>
@@ -151,12 +164,15 @@ export default function App() {
                 {/* Main content */}
                 <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6">
                   <Routes>
-                    {/* Driver gets their own default route */}
+                    {/* Single-purpose roles each get their own root landing.
+                        Driver -> route view, Importer -> CSV upload. */}
                     {isDriver ? (
                       <>
                         <Route path="/" element={<DriverPanel />} />
                         <Route path="/driver" element={<DriverPanel />} />
                       </>
+                    ) : isImporter ? (
+                      <Route path="/" element={<OrderImportPanel />} />
                     ) : (
                       <Route path="/" element={<Dashboard notifications={notifications} />} />
                     )}
@@ -173,6 +189,11 @@ export default function App() {
                     <Route path="/admin" element={
                       <ProtectedRoute roles={['Admin', 'SuperAdmin']}>
                         <AdminPanel />
+                      </ProtectedRoute>
+                    } />
+                    <Route path="/import" element={
+                      <ProtectedRoute roles={['Admin', 'SuperAdmin', 'OrderImporter']}>
+                        <OrderImportPanel />
                       </ProtectedRoute>
                     } />
                     <Route path="/communications" element={

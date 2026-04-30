@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { getSettings, saveSettings } from '../services/apiService'
-import type { UserRouteSettings } from '../types'
+import { DEFAULT_MAX_STOPS, MAX_STOPS_HARD_CAP, type UserRouteSettings } from '../types'
 
 // Start and end addresses are no longer configured here — every route
 // originates and terminates at the assigned truck's home hub (set per-van
@@ -11,6 +11,8 @@ export default function SettingsPanel() {
     deliveryWindowStart: '08:00:00',
     deliveryWindowEnd: '17:00:00',
     confirmationDeadlineHours: 3,
+    maxStopsPerRoute: DEFAULT_MAX_STOPS,
+    waitMinutesPerStop: 0,
   })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -74,6 +76,50 @@ export default function SettingsPanel() {
               className={inputClass} required />
             <p className="text-xs text-gray-400 mt-1">
               If a store hasn't confirmed within this window, the delivery is rescheduled.
+            </p>
+          </Field>
+        </Section>
+
+        <Section title="Route Limits">
+          <Field label={`Maximum Stops per Route (max ${MAX_STOPS_HARD_CAP})`}>
+            <input
+              type="number"
+              value={settings.maxStopsPerRoute}
+              min={1}
+              max={MAX_STOPS_HARD_CAP}
+              onChange={(e) => {
+                const parsed = parseInt(e.target.value, 10)
+                if (Number.isNaN(parsed)) return
+                // Browser-side clamp so users don't submit a value above the cap.
+                update('maxStopsPerRoute', Math.min(Math.max(parsed, 1), MAX_STOPS_HARD_CAP))
+              }}
+              className={inputClass}
+              required
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              Hard cap on deliveries per route. The optimizer splits ready
+              orders into chunks no larger than this value. Server enforces a
+              maximum of {MAX_STOPS_HARD_CAP}.
+            </p>
+          </Field>
+          <Field label="Wait Time per Stop (minutes)">
+            <input
+              type="number"
+              value={settings.waitMinutesPerStop}
+              min={0}
+              max={120}
+              onChange={(e) => {
+                const parsed = parseInt(e.target.value, 10)
+                if (Number.isNaN(parsed)) return
+                update('waitMinutesPerStop', Math.max(parsed, 0))
+              }}
+              className={inputClass}
+              required
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              Idle time the van waits at each delivery stop, on top of the
+              service time. Does not apply to the start or end at the home
+              hub — those depot bookends are not delivery stops.
             </p>
           </Field>
         </Section>
