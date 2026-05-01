@@ -96,16 +96,56 @@ export interface ImportedOrderRow {
 export interface ImportOrdersResult {
   created: number
   orderIds: string[]
+  routesQueued?: number
+  routeOmitted?: number
+  ordersUngeocoded?: number
+  noActiveHub?: boolean
+  storesGeocoded?: number
+  hubsGeocoded?: number
+  warehousesGeocoded?: number
+  geocodeFailures?: number
+  initialStatus?: string
   errors: { row: number; message: string }[]
 }
 
-export async function importOrders(rows: ImportedOrderRow[]): Promise<ImportOrdersResult> {
-  const { data } = await api.post<ImportOrdersResult>('/orders/import', { rows })
+export type ImportInitialStatus = 'Ordered' | 'Scheduled'
+
+export async function importOrders(
+  rows: ImportedOrderRow[],
+  initialStatus: ImportInitialStatus = 'Ordered',
+): Promise<ImportOrdersResult> {
+  const { data } = await api.post<ImportOrdersResult>('/orders/import', { rows, initialStatus })
   return data
 }
 
 export async function updateOrderStatus(id: string, status: string): Promise<void> {
   await api.patch(`/orders/${id}/status`, { status })
+}
+
+export interface BulkStatusResult {
+  requested: number
+  updated: number
+  status: string
+  routeOmitted?: number
+  routesQueued?: number
+  ordersUngeocoded?: number
+  noActiveHub?: boolean
+  storesGeocoded?: number
+  hubsGeocoded?: number
+  warehousesGeocoded?: number
+  geocodeFailures?: number
+  results: {
+    orderId: string
+    ok: boolean
+    status?: string
+    error?: string
+    rewrittenAsStale?: boolean
+  }[]
+}
+
+export async function bulkUpdateOrderStatus(orderIds: string[], status: string): Promise<BulkStatusResult> {
+  const { data } = await api.patch<BulkStatusResult>('/orders/status', { orderIds, status })
+  return data
 }
 
 // ---- Routes ----

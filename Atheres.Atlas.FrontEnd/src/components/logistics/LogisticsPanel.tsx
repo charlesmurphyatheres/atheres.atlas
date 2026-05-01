@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { getRoutes, getTrucks, confirmDeliveryManual, reorderRouteStop } from '../../services/apiService'
-import type { Route, RouteStop, Truck } from '../../types'
+import type { Route, RouteStop, Truck, WarehousePickup } from '../../types'
 import { format, addDays, subDays } from 'date-fns'
 
 export default function LogisticsPanel() {
@@ -202,6 +202,13 @@ function StopEditor({ route, onUpdate }: { route: Route; onUpdate: (r: Route) =>
         {/* Start (depot origin) */}
         <DepotRow kind="start" address={route.startAddress} />
 
+        {/* Warehouse pickup — pinned first physical stop after the depot.
+            Always before any delivery; the route was built specifically
+            so the driver picks up products here before any drop-off. */}
+        {route.warehousePickup && (
+          <WarehousePickupRow pickup={route.warehousePickup} />
+        )}
+
         {stops.map((stop, i) => (
           <div key={stop.orderId} className="px-5 py-3.5 flex items-center gap-4">
             {/* Sequence number + reorder */}
@@ -289,6 +296,36 @@ function DepotRow({ kind, address, subtitle }: {
         </p>
         <p className="text-xs text-gray-600 truncate">{address}</p>
         {subtitle && <p className="text-[11px] text-gray-400 mt-0.5">{subtitle}</p>}
+      </div>
+    </div>
+  )
+}
+
+// ---- Warehouse Pickup Row -----------------------------------------------
+//
+// Pinned between the depot start row and the delivery sequence. Visually
+// distinct from both: amber-tinted background, "W" chip, "Pickup" label.
+// The driver always visits this stop first to load product before any of
+// the customer deliveries.
+
+function WarehousePickupRow({ pickup }: { pickup: WarehousePickup }) {
+  return (
+    <div className="px-5 py-3.5 flex items-center gap-4 bg-amber-50/40">
+      <div className="flex flex-col items-center gap-0.5 shrink-0 w-7">
+        <span className="w-7 h-7 rounded-md bg-amber-500 text-white text-[10px] font-bold flex items-center justify-center uppercase tracking-wide">
+          W
+        </span>
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold text-amber-700">
+          Pickup · {pickup.name}
+        </p>
+        <p className="text-xs text-gray-600 truncate">{pickup.address}</p>
+        {pickup.estimatedArrival && (
+          <p className="text-[11px] text-gray-400 mt-0.5">
+            ETA {format(new Date(pickup.estimatedArrival), 'HH:mm')}
+          </p>
+        )}
       </div>
     </div>
   )

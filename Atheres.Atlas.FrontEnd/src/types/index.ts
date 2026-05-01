@@ -9,6 +9,7 @@ export type OrderStatus =
   | 'Delivered'
   | 'Archived'
   | 'Cancelled'
+  | 'RouteOmitted'
 
 export type ConfirmationStatus =
   | 'Pending'
@@ -32,6 +33,10 @@ export interface Order {
   id: string
   warehouseLicenseNumber?: string
   storeLicenseNumber?: string
+  licenseNumber?: string
+  customer?: string
+  salesOrderNumber?: string
+  purchaseOrderNumber?: string
   storeName: string
   address: string
   city: string
@@ -73,10 +78,20 @@ export interface RouteStop {
   legDurationMinutes: number
 }
 
+export interface WarehousePickup {
+  id: string
+  name: string
+  address: string
+  latitude?: number
+  longitude?: number
+  estimatedArrival?: string
+}
+
 export interface Route {
   id: string
   deliveryDate: string
   warehouseId?: string
+  warehousePickup?: WarehousePickup
   hubId?: string
   startAddress: string
   startLatitude: number

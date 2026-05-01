@@ -13,15 +13,19 @@ namespace Atheres.Atlas.Auth.Functions.Services;
 public class SendGridEmailService : IEmailService
 {
     private readonly ILogger<SendGridEmailService> _logger;
-    private readonly string _apiKey;
+    private readonly string? _apiKey;
     private readonly string _fromEmail;
     private readonly string _fromName;
 
     public SendGridEmailService(ILogger<SendGridEmailService> logger)
     {
         _logger    = logger;
-        _apiKey    = Environment.GetEnvironmentVariable("SendGridApiKey")
-                     ?? throw new InvalidOperationException("SendGridApiKey is not configured.");
+        // Read but don't throw on missing key — this service is injected into
+        // AuthFunctions (login, refresh, etc.) and a missing SendGrid setting
+        // must not break authentication. Only the OrderImporter invitation
+        // flow actually depends on email delivery; SendAsync below logs a
+        // warning and returns false when no key is configured.
+        _apiKey    = Environment.GetEnvironmentVariable("SendGridApiKey");
         _fromEmail = Environment.GetEnvironmentVariable("SendGridFromEmail") ?? "noreply@atheres-atlas.com";
         _fromName  = Environment.GetEnvironmentVariable("SendGridFromName")  ?? "Atlas Deliver";
     }
@@ -33,6 +37,14 @@ public class SendGridEmailService : IEmailService
 
     public async Task<bool> SendAsync(EmailRequest request, CancellationToken ct = default)
     {
+        if (string.IsNullOrWhiteSpace(_apiKey))
+        {
+            _logger.LogWarning(
+                "SendGridApiKey not configured — skipping email to {To} (subject: {Subject}).",
+                request.To, request.Subject);
+            return false;
+        }
+
         try
         {
             var client = new SendGridClient(_apiKey);

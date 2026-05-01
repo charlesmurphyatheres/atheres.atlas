@@ -20,6 +20,11 @@
 
 set -euo pipefail
 
+# Anchor cwd to the repo root (parent of scripts/) so docker-compose.yml,
+# .env, and every relative path below resolves regardless of where this
+# script was invoked from.
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
 # ---- Constants -----------------------------------------------
 COMPOSE_PROJECT="atheres-atlas"
 IMAGES=(migrations functions auth frontend)

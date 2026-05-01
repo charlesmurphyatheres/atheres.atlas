@@ -17,7 +17,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$root = $PSScriptRoot
+# Project root is the parent of scripts/. Functions local.settings.json + the
+# data\warehouses.csv etc. are looked up relative to it.
+$root = Split-Path -Parent $PSScriptRoot
 
 function Write-Header  { param($msg) Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 function Write-Info    { param($msg) Write-Host "[INFO]  $msg"  -ForegroundColor Cyan }
@@ -171,6 +173,14 @@ VALUES ('$id', '$CompanyId', N'$businessName', N'$alternateName', N'$addressVal'
 }
 
 # ---- Import Hubs -----------------------------------------------
+# Hubs.csv carries hard-coded Latitude/Longitude for the four real
+# Secure Transport depots; persisting them here means RouteOptimizationAgent
+# never has to call Google to geocode the depot — it just reads the cached
+# coords. The script handles two states:
+#   1. Fresh DB (no hubs)         -> INSERT every row with lat/lng baked in.
+#   2. Existing DB with coords    -> no-op (idempotent).
+#   3. Existing DB missing coords -> UPDATE rows whose Latitude is NULL
+#      using the CSV's coords, matched by Name.
 Write-Header "Importing Hubs"
 
 $hubsFile = Join-Path $root "data\hubs.csv"
@@ -182,7 +192,34 @@ if (-not (Test-Path $hubsFile)) {
 
     $existingCount = Invoke-SqlScalar -Query "SELECT COUNT(*) FROM Hubs WHERE CompanyId = '$CompanyId'" -ConnStr $ConnectionString
     if ($existingCount -gt 0) {
-        Write-Warn "$existingCount hubs already exist for this company. Skipping import (idempotent)."
+        Write-Warn "$existingCount hubs already exist for this company. Backfilling lat/lng on rows missing coordinates..."
+        $backfilled = 0
+        foreach ($h in $hubs) {
+            if ([string]::IsNullOrWhiteSpace($h.Latitude) -or [string]::IsNullOrWhiteSpace($h.Longitude)) {
+                continue
+            }
+            $name = $h.'Name' -replace "'", "''"
+            $sql = @"
+UPDATE Hubs
+SET    Latitude  = $($h.Latitude),
+       Longitude = $($h.Longitude),
+       UpdatedAt = SYSUTCDATETIME()
+WHERE  CompanyId = '$CompanyId'
+  AND  Name      = N'$name'
+  AND (Latitude IS NULL OR Longitude IS NULL);
+"@
+            try {
+                $rows = Invoke-Sql -Query $sql -ConnStr $ConnectionString
+                if ($rows -gt 0) { $backfilled += $rows }
+            } catch {
+                Write-Warn "Failed to backfill hub '$name': $_"
+            }
+        }
+        if ($backfilled -gt 0) {
+            Write-Ok "Backfilled coordinates on $backfilled hub row(s)."
+        } else {
+            Write-Info "All existing hubs already have coordinates — nothing to backfill."
+        }
     } else {
         $imported = 0
         $now = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fff")
@@ -194,10 +231,15 @@ if (-not (Test-Path $hubsFile)) {
             $city = $h.'City' -replace "'", "''"
             $state = $h.'State' -replace "'", "''"
             $zip = $h.'Zip' -replace "'", "''"
+            # Latitude / Longitude are optional in the CSV; emit a SQL NULL
+            # when blank so the EF query filter still treats the row as
+            # ungeocoded (and the optimizer self-heal can fill it).
+            $latSql = if ([string]::IsNullOrWhiteSpace($h.Latitude))  { 'NULL' } else { $h.Latitude }
+            $lngSql = if ([string]::IsNullOrWhiteSpace($h.Longitude)) { 'NULL' } else { $h.Longitude }
 
             $sql = @"
-INSERT INTO Hubs (Id, CompanyId, Name, Address, City, State, Zip, IsActive, CreatedAt, UpdatedAt)
-VALUES ('$id', '$CompanyId', N'$name', N'$address', N'$city', '$state', '$zip', 1, '$now', '$now')
+INSERT INTO Hubs (Id, CompanyId, Name, Address, City, State, Zip, Latitude, Longitude, IsActive, CreatedAt, UpdatedAt)
+VALUES ('$id', '$CompanyId', N'$name', N'$address', N'$city', '$state', '$zip', $latSql, $lngSql, 1, '$now', '$now')
 "@
             try {
                 Invoke-Sql -Query $sql -ConnStr $ConnectionString | Out-Null

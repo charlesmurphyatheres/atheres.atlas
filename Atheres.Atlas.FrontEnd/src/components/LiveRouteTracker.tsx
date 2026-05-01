@@ -181,6 +181,14 @@ export default function LiveRouteTracker() {
                   {route.totalStops} stops · {route.totalDistanceMiles.toFixed(1)} mi · {route.totalDuration}
                 </div>
                 <div className="flex flex-wrap gap-1 mt-2">
+                  {route.warehousePickup && (
+                    <span
+                      title={`Pickup at ${route.warehousePickup.name}`}
+                      className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-medium"
+                    >
+                      W
+                    </span>
+                  )}
                   {route.stops.slice().sort((a, b) => a.sequence - b.sequence).slice(0, 6).map((s) => (
                     <span key={s.orderId}
                       className={`text-[10px] px-1.5 py-0.5 rounded ${
@@ -227,6 +235,55 @@ export default function LiveRouteTracker() {
                     }}
                   />
                 )
+              })}
+
+              {/* Hub markers (square, slate) — the depot the route starts
+                  and returns to. Latitude/longitude are persisted on the
+                  route so the same coords drive the marker as draw the
+                  polyline endpoints. */}
+              {visibleRoutes.flatMap((route) => {
+                if (!route.startLatitude || !route.startLongitude) return []
+                return [(
+                  <Marker
+                    key={`hub-${route.id}`}
+                    position={{ lat: route.startLatitude, lng: route.startLongitude }}
+                    label={{ text: 'H', color: '#fff', fontWeight: 'bold', fontSize: '11px' }}
+                    title={`Hub: ${route.startAddress}`}
+                    icon={{
+                      path: 'M -10 -10 L 10 -10 L 10 10 L -10 10 Z',  // square
+                      fillColor: '#1f2937', // slate-800 — distinct from warehouse amber + delivery hue
+                      fillOpacity: 1,
+                      strokeColor: '#fff',
+                      strokeWeight: 2,
+                      scale: 1,
+                    }}
+                    zIndex={500}
+                  />
+                )]
+              })}
+
+              {/* Warehouse pickup markers (square, amber) — appear before any
+                  stop on each route, signalling "first physical stop / pickup". */}
+              {visibleRoutes.flatMap((route) => {
+                if (!route.warehousePickup
+                    || route.warehousePickup.latitude == null
+                    || route.warehousePickup.longitude == null) return []
+                return [(
+                  <Marker
+                    key={`wh-${route.id}`}
+                    position={{ lat: route.warehousePickup.latitude, lng: route.warehousePickup.longitude }}
+                    label={{ text: 'W', color: '#fff', fontWeight: 'bold', fontSize: '11px' }}
+                    title={`Pickup: ${route.warehousePickup.name}`}
+                    icon={{
+                      path: 'M -10 -10 L 10 -10 L 10 10 L -10 10 Z',  // square
+                      fillColor: '#d97706', // amber-600
+                      fillOpacity: 1,
+                      strokeColor: '#fff',
+                      strokeWeight: 2,
+                      scale: 1,
+                    }}
+                  />
+                )]
               })}
 
               {/* Stop markers */}
@@ -313,6 +370,17 @@ function fitBounds(map: google.maps.Map, routes: Route[]) {
   const bounds = new google.maps.LatLngBounds()
   let hasPoints = false
   for (const route of routes) {
+    // Include the hub itself so its marker is always visible — otherwise
+    // a route whose deliveries cluster far from the depot can leave the
+    // hub off-screen at the initial zoom.
+    if (route.startLatitude && route.startLongitude) {
+      bounds.extend({ lat: route.startLatitude, lng: route.startLongitude })
+      hasPoints = true
+    }
+    if (route.warehousePickup?.latitude != null && route.warehousePickup?.longitude != null) {
+      bounds.extend({ lat: route.warehousePickup.latitude, lng: route.warehousePickup.longitude })
+      hasPoints = true
+    }
     for (const stop of route.stops) {
       bounds.extend({ lat: stop.latitude, lng: stop.longitude })
       hasPoints = true

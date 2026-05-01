@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Atheres.Atlas.Data;
 using Atheres.Atlas.Data.Repositories;
+using Atheres.Atlas.Domain.Constants;
 using Atheres.Atlas.Domain.Entities;
 using Atheres.Atlas.Domain.Enums;
 using Atheres.Atlas.Domain.Messages;
@@ -245,14 +246,27 @@ public class BatchAgent
         batch.Status = BatchStatus.Scheduled;
         batch.UpdatedAt = DateTime.UtcNow;
 
-        // Mark all orders as pending optimization
+        // Mark routable orders as Scheduled and stale orders (more than a
+        // day old) as RouteOmitted in the same pass. Either way they leave
+        // the Ordered state, so the next trigger doesn't keep rediscovering
+        // them.
+        var nowUtc        = DateTime.UtcNow;
         var validOrderIds = new List<Guid>();
+        var omittedCount  = 0;
         foreach (var order in batch.Orders)
         {
+            if (RoutingPolicy.IsTooOldToRoute(order.OrderDate, nowUtc))
+            {
+                order.Status    = OrderStatus.RouteOmitted;
+                order.UpdatedAt = nowUtc;
+                omittedCount++;
+                continue;
+            }
+
             if (order.Latitude.HasValue && order.Longitude.HasValue)
             {
-                order.Status = OrderStatus.Scheduled;
-                order.UpdatedAt = DateTime.UtcNow;
+                order.Status    = OrderStatus.Scheduled;
+                order.UpdatedAt = nowUtc;
                 validOrderIds.Add(order.Id);
             }
         }
@@ -261,7 +275,11 @@ public class BatchAgent
 
         if (validOrderIds.Count == 0)
         {
-            return new BadRequestObjectResult(new { error = "No geocoded orders in batch. Ensure orders are validated first." });
+            return new BadRequestObjectResult(new
+            {
+                error        = "No routable orders in batch. Stale rows were marked Route Omitted; remaining rows must be geocoded and at most a day old.",
+                routeOmitted = omittedCount,
+            });
         }
 
         // Trigger route optimization
@@ -283,9 +301,10 @@ public class BatchAgent
 
         return new OkObjectResult(new
         {
-            batchId = batch.Id,
+            batchId      = batch.Id,
             pickupDate,
             ordersQueued = validOrderIds.Count,
+            routeOmitted = omittedCount,
             routeRequestId,
         });
     }
@@ -326,12 +345,41 @@ public class BatchAgent
         // Pull every Ordered order at this warehouse — orders are sales-order
         // level only (no per-item readiness), so the warehouse signaling
         // "ready to pickup" implicitly marks every pending order ready.
-        var orders = await _db.Orders.IgnoreQueryFilters()
-            .Where(o => o.WarehouseId == warehouse.Id && o.CompanyId == company.Id && o.Status == OrderStatus.Ordered)
+        var allOrdered = await _db.Orders.IgnoreQueryFilters()
+            .Where(o => o.WarehouseId == warehouse.Id
+                     && o.CompanyId == company.Id
+                     && o.Status == OrderStatus.Ordered)
             .ToListAsync(ct);
 
+        // Stale rows (more than a day old) are flipped to RouteOmitted in
+        // place rather than dispatched. The warehouse has likely already
+        // resolved them through another path, so we record the omission
+        // and move on instead of silently leaving them as Ordered (where a
+        // future trigger would attempt to route them again).
+        var nowUtc = DateTime.UtcNow;
+        var stale  = allOrdered.Where(o => RoutingPolicy.IsTooOldToRoute(o.OrderDate, nowUtc)).ToList();
+        var orders = allOrdered.Except(stale).ToList();
+
+        if (stale.Count > 0)
+        {
+            foreach (var s in stale)
+            {
+                s.Status    = OrderStatus.RouteOmitted;
+                s.UpdatedAt = nowUtc;
+            }
+            await _db.SaveChangesAsync(ct);
+            _logger.LogInformation(
+                "ReadyToPickup: flipped {Count} stale order(s) to RouteOmitted for warehouse {Warehouse}",
+                stale.Count, warehouse.Id);
+        }
+
         if (orders.Count == 0)
-            return new OkObjectResult(new { message = "No pending orders for this warehouse.", orderCount = 0 });
+            return new OkObjectResult(new
+            {
+                message       = "No pending orders for this warehouse.",
+                orderCount    = 0,
+                routeOmitted  = stale.Count,
+            });
 
         // Get all active hubs with available trucks
         var hubs = await _db.Hubs.IgnoreQueryFilters()
@@ -356,9 +404,17 @@ public class BatchAgent
         }
         else
         {
-            // Use Distance Matrix: measure distance from each hub to each store
-            var hubAddresses = hubs.Select(h => h.FormattedAddress ?? h.FullAddress).ToList();
-            var storeAddresses = routableOrders.Select(o => o.FormattedAddress ?? o.FullAddress).ToList();
+            // Self-heal: any hub missing coordinates gets geocoded once
+            // and persisted, so the next run reads from the DB instead of
+            // calling Google. Mirrors RouteOptimizationAgent's caching.
+            await EnsureHubsGeocodedAsync(hubs, ct);
+
+            // Use Distance Matrix: measure distance from each hub to each
+            // store. Pass "lat,lng" strings whenever we have coords cached
+            // — Google still accepts addresses, but using coords skips its
+            // server-side geocode lookup that we already paid for once.
+            var hubAddresses   = hubs.Select(h => BuildPoint(h.Latitude, h.Longitude, h.FormattedAddress ?? h.FullAddress)).ToList();
+            var storeAddresses = routableOrders.Select(o => BuildPoint(o.Latitude, o.Longitude, o.FormattedAddress ?? o.FullAddress)).ToList();
 
             var matrix = await _maps.GetDistanceMatrixAsync(hubAddresses, storeAddresses, ct);
 
@@ -484,6 +540,46 @@ public class BatchAgent
     {
         var claim = req.HttpContext.User.FindFirst("companyId")?.Value;
         return Guid.TryParse(claim, out var id) ? id : null;
+    }
+
+    /// <summary>
+    /// "lat,lng" when coordinates are available; the free-form address
+    /// otherwise. Same caching strategy as RouteOptimizationAgent — never
+    /// pay for the same Google geocode twice.
+    /// </summary>
+    private static string BuildPoint(double? lat, double? lng, string fallbackAddress) =>
+        lat.HasValue && lng.HasValue
+            ? FormattableString.Invariant($"{lat.Value:F6},{lng.Value:F6}")
+            : fallbackAddress;
+
+    /// <summary>
+    /// Geocodes any hub in the supplied list that's missing coordinates,
+    /// persists the result, and updates the entity in place. Failures are
+    /// logged and left as-is so the caller can still fall back to the
+    /// address string.
+    /// </summary>
+    private async Task EnsureHubsGeocodedAsync(IEnumerable<Domain.Entities.Hub> hubs, CancellationToken ct)
+    {
+        var dirty = false;
+        foreach (var hub in hubs)
+        {
+            if (hub.Latitude.HasValue && hub.Longitude.HasValue) continue;
+            if (string.IsNullOrWhiteSpace(hub.Address)) continue;
+
+            var geo = await _maps.GeocodeAsync(hub.FullAddress, ct);
+            if (geo is null)
+            {
+                _logger.LogWarning("Could not geocode hub {HubId} ({Name}); falling back to address string.",
+                    hub.Id, hub.Name);
+                continue;
+            }
+            hub.Latitude         = geo.Latitude;
+            hub.Longitude        = geo.Longitude;
+            hub.FormattedAddress = geo.FormattedAddress;
+            hub.UpdatedAt        = DateTime.UtcNow;
+            dirty = true;
+        }
+        if (dirty) await _db.SaveChangesAsync(ct);
     }
 }
 

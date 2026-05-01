@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Atheres.Atlas.Data;
 using Atheres.Atlas.Data.Repositories;
+using Atheres.Atlas.Domain.Constants;
 using Atheres.Atlas.Domain.Entities;
 using Atheres.Atlas.Domain.Enums;
 using Atheres.Atlas.Domain.Messages;
@@ -87,6 +88,12 @@ public class RouteOptimizationAgent
             .FirstOrDefaultAsync(h => h.Id == effectiveHubId, ct)
             ?? throw new InvalidOperationException($"Hub {effectiveHubId} not found.");
 
+        // First-use geocode self-heal for the hub. Hubs are created via
+        // Auth.Functions HubFunctions.Create which doesn't (and can't
+        // easily) call Google Maps; we cache the result here on the way
+        // into the routing pipeline so subsequent runs skip the lookup.
+        await EnsureHubGeocodedAsync(hub, ct);
+
         // Load the company so we can read company-wide delivery window. The
         // window is a company-level policy (not per-truck), so a missing
         // company would mean a malformed request — fall back to defaults.
@@ -108,10 +115,25 @@ public class RouteOptimizationAgent
         {
             warehouse = await _db.Warehouses.IgnoreQueryFilters()
                 .FirstOrDefaultAsync(w => w.Id == message.WarehouseId.Value, ct);
+            if (warehouse is not null)
+            {
+                // Same self-heal as the hub: cache the warehouse's coords
+                // on first use so future routing runs hit the DB instead
+                // of Google's geocoder.
+                await EnsureWarehouseGeocodedAsync(warehouse, ct);
+            }
         }
 
-        // Load all orders
-        var orderList = new List<Order>();
+        // Load all orders. Stale rows (more than a day old) get flipped to
+        // RouteOmitted right here as a backstop — every trigger endpoint
+        // already filters them out, but messages can sit on the queue long
+        // enough to age in, and a future caller may forget to enforce the
+        // rule. Marking them RouteOmitted (rather than silently skipping)
+        // makes the omission visible to operators and prevents the next
+        // optimization run from rediscovering them.
+        var nowUtc       = DateTime.UtcNow;
+        var orderList    = new List<Order>();
+        var staleOrders  = new List<Order>();
         foreach (var orderId in message.OrderIds)
         {
             var order = await _orders.GetByIdAsync(orderId, ct);
@@ -125,7 +147,29 @@ public class RouteOptimizationAgent
                 _logger.LogWarning("Order {OrderId} has no geocode, skipping", orderId);
                 continue;
             }
+            if (RoutingPolicy.IsTooOldToRoute(order.OrderDate, nowUtc))
+            {
+                staleOrders.Add(order);
+                _logger.LogWarning(
+                    "Order {OrderId} is more than a day old ({OrderDate:o}); flipping to RouteOmitted instead of routing.",
+                    orderId, order.OrderDate);
+                continue;
+            }
             orderList.Add(order);
+        }
+
+        if (staleOrders.Count > 0)
+        {
+            foreach (var s in staleOrders)
+            {
+                s.Status    = OrderStatus.RouteOmitted;
+                s.UpdatedAt = nowUtc;
+                await _orders.UpdateAsync(s, ct);
+            }
+            await _orders.SaveChangesAsync(ct);
+            _logger.LogInformation(
+                "Route {RouteRequestId}: flipped {Stale} stale order(s) to RouteOmitted.",
+                message.RouteRequestId, staleOrders.Count);
         }
 
         if (orderList.Count == 0)
@@ -134,35 +178,96 @@ public class RouteOptimizationAgent
             return;
         }
 
-        // Build waypoints: warehouse pickup (if needed) + store deliveries
-        var waypoints = new List<string>();
+        // Build the route. The driver's physical day is:
+        //   1. Hub → Warehouse (pickup of products) — pinned first
+        //   2. Warehouse → optimized(deliveries) → Hub
+        // We can't pin the warehouse inside Google Directions' optimize:true
+        // (it reorders ALL waypoints), so we issue two separate Directions
+        // calls and stitch the results. Without a warehouse, we fall back
+        // to the original single-call optimize-from-hub behavior.
+        //
+        // Coordinate strings ("lat,lng") are preferred over free-form
+        // addresses so Google doesn't re-geocode on every routing run —
+        // the cached geocodes from the scheduler's earlier pass are used
+        // directly.
+        var hubPoint = BuildRoutePoint(hub.Latitude, hub.Longitude, hub.FormattedAddress ?? hub.FullAddress);
+        var deliveryWaypoints = orderList.Select(o =>
+            BuildRoutePoint(o.Latitude, o.Longitude, o.FormattedAddress ?? o.FullAddress)).ToList();
+
+        OptimizedRoute? pickupLeg     = null;   // Hub → Warehouse, when warehouse is present
+        OptimizedRoute  deliveryLoop;            // Warehouse|Hub → optimized(deliveries) → Hub
+
         if (warehouse is not null)
-            waypoints.Add(warehouse.FormattedAddress ?? warehouse.FullAddress);
-        waypoints.AddRange(orderList.Select(o => o.FormattedAddress ?? o.FullAddress));
-
-        // Hub is always origin and destination
-        var hubAddress = hub.FormattedAddress ?? hub.FullAddress;
-        var optimizedRoute = await _maps.GetOptimizedRouteAsync(
-            hubAddress,
-            hubAddress,
-            waypoints,
-            ct);
-
-        if (optimizedRoute is null)
         {
-            _logger.LogError("Route optimization failed for {RouteRequestId}", message.RouteRequestId);
-            await SafePublish(() => _bus.PublishAsync(ServiceBusQueues.Audit, new AuditMessage(
-                AuditEventType.RouteOptimizationFailed, nameof(RouteOptimizationAgent),
-                message.CompanyId, null, message.RouteRequestId,
-                null, null, "Google Maps API returned no route", false,
-                "No route returned", DateTime.UtcNow), ct),
-                "failure audit event");
-            return;
+            var warehousePoint = BuildRoutePoint(
+                warehouse.Latitude, warehouse.Longitude,
+                warehouse.FormattedAddress ?? warehouse.FullAddress);
+
+            // Pre-pickup leg: a simple A→B drive with no waypoints. The
+            // driver hasn't started delivering yet; this is the trip from
+            // depot to the supplier where products are loaded.
+            pickupLeg = await _maps.GetOptimizedRouteAsync(hubPoint, warehousePoint, Array.Empty<string>(), ct);
+            if (pickupLeg is null)
+            {
+                _logger.LogError("Hub→Warehouse leg failed for {RouteRequestId}", message.RouteRequestId);
+                await SafePublish(() => _bus.PublishAsync(ServiceBusQueues.Audit, new AuditMessage(
+                    AuditEventType.RouteOptimizationFailed, nameof(RouteOptimizationAgent),
+                    message.CompanyId, null, message.RouteRequestId,
+                    null, null, "Google Maps API returned no hub→warehouse route", false,
+                    "No pickup leg", DateTime.UtcNow), ct),
+                    "failure audit event");
+                return;
+            }
+
+            // Delivery loop: warehouse is the origin, hub is the destination,
+            // and all the deliveries get optimized in between. This guarantees
+            // the warehouse is the first physical stop after the hub.
+            var loop = await _maps.GetOptimizedRouteAsync(warehousePoint, hubPoint, deliveryWaypoints, ct);
+            if (loop is null)
+            {
+                _logger.LogError("Warehouse→deliveries→Hub leg failed for {RouteRequestId}", message.RouteRequestId);
+                await SafePublish(() => _bus.PublishAsync(ServiceBusQueues.Audit, new AuditMessage(
+                    AuditEventType.RouteOptimizationFailed, nameof(RouteOptimizationAgent),
+                    message.CompanyId, null, message.RouteRequestId,
+                    null, null, "Google Maps API returned no delivery loop", false,
+                    "No delivery loop", DateTime.UtcNow), ct),
+                    "failure audit event");
+                return;
+            }
+            deliveryLoop = loop;
+        }
+        else
+        {
+            // No warehouse pickup — original single-call behavior:
+            // Hub → optimized(deliveries) → Hub.
+            var loop = await _maps.GetOptimizedRouteAsync(hubPoint, hubPoint, deliveryWaypoints, ct);
+            if (loop is null)
+            {
+                _logger.LogError("Route optimization failed for {RouteRequestId}", message.RouteRequestId);
+                await SafePublish(() => _bus.PublishAsync(ServiceBusQueues.Audit, new AuditMessage(
+                    AuditEventType.RouteOptimizationFailed, nameof(RouteOptimizationAgent),
+                    message.CompanyId, null, message.RouteRequestId,
+                    null, null, "Google Maps API returned no route", false,
+                    "No route returned", DateTime.UtcNow), ct),
+                    "failure audit event");
+                return;
+            }
+            deliveryLoop = loop;
         }
 
-        // Build delivery times starting from window start
+        // Aggregate distance/duration across both legs so the route summary
+        // reflects the full driving day (hub→warehouse→deliveries→hub),
+        // not just the optimized loop.
+        var pickupDistance = pickupLeg?.TotalDistanceMeters  ?? 0;
+        var pickupDuration = pickupLeg?.TotalDurationSeconds ?? 0;
+        var totalDistance  = pickupDistance + deliveryLoop.TotalDistanceMeters;
+        var totalDuration  = pickupDuration + deliveryLoop.TotalDurationSeconds;
+
+        // Build delivery times starting from window start. The hub→warehouse
+        // drive eats into the window before the first delivery is even
+        // attempted, so include its duration in the running clock.
         var deliveryStart = message.DeliveryDate.Date.Add(deliveryWindowStart);
-        var runningTime = deliveryStart;
+        var runningTime   = deliveryStart.AddSeconds(pickupDuration);
 
         // Create the route entity (hub is always start and end)
         var route = new DeliveryRoute
@@ -173,42 +278,47 @@ public class RouteOptimizationAgent
             HubId = effectiveHubId,
             WarehouseId = message.WarehouseId,
             DeliveryDate = message.DeliveryDate,
-            StartAddress = hubAddress,
+            // StartAddress / EndAddress are the human-readable fall-back —
+            // always store the formatted/full address for display, not the
+            // "lat,lng" string we passed to Directions.
+            StartAddress = hub.FormattedAddress ?? hub.FullAddress,
             StartLatitude = hub.Latitude ?? 0,
             StartLongitude = hub.Longitude ?? 0,
-            EndAddress = hubAddress,
+            EndAddress = hub.FormattedAddress ?? hub.FullAddress,
             EndLatitude = hub.Latitude ?? 0,
             EndLongitude = hub.Longitude ?? 0,
-            TotalDistanceMeters = optimizedRoute.TotalDistanceMeters,
-            TotalDurationSeconds = optimizedRoute.TotalDurationSeconds,
+            TotalDistanceMeters = totalDistance,
+            TotalDurationSeconds = totalDuration,
             TotalStops = orderList.Count,
             IsOptimized = true,
-            OverviewPolyline = optimizedRoute.OverviewPolyline,
-            OptimizedWaypointOrder = JsonSerializer.Serialize(optimizedRoute.WaypointOrder)
+            // Stitch the pickup leg + delivery loop into a single
+            // continuous polyline so the map draws the full
+            // Hub → Warehouse → optimized stops → Hub loop. Google's
+            // encoded-polyline format is delta-based, so naive string
+            // concatenation breaks; PolylineCodec.Concat decodes both,
+            // dedupes the joint point, and re-encodes.
+            OverviewPolyline = pickupLeg is not null
+                ? PolylineCodec.Concat(pickupLeg.OverviewPolyline, deliveryLoop.OverviewPolyline)
+                : deliveryLoop.OverviewPolyline,
+            OptimizedWaypointOrder = JsonSerializer.Serialize(deliveryLoop.WaypointOrder)
         };
 
         await _routes.AddAsync(route, ct);
         await _routes.SaveChangesAsync(ct);
 
-        // Assign orders to stops in optimized order.
-        // If a warehouse is included, it occupies index 0 in the waypoint list,
-        // so we offset order indices by 1 and skip the warehouse waypoint.
-        var warehouseOffset = warehouse is not null ? 1 : 0;
+        // Walk the optimized delivery loop, building one RouteStop per
+        // delivery in order. Warehouse is no longer a waypoint here (it's
+        // the loop's origin), so we don't have to skip-or-offset anything
+        // — every entry in the optimized order is a real delivery.
         var confirmationMessages = new List<ConfirmationRequestMessage>();
         int stopSequence = 0;
 
-        for (int i = 0; i < optimizedRoute.WaypointOrder.Count; i++)
+        for (int i = 0; i < deliveryLoop.WaypointOrder.Count; i++)
         {
-            var originalIndex = optimizedRoute.WaypointOrder[i];
-
-            // Skip the warehouse waypoint — it's a pickup stop, not a delivery
-            if (warehouse is not null && originalIndex == 0)
-                continue;
-
-            var orderIndex = originalIndex - warehouseOffset;
+            var orderIndex = deliveryLoop.WaypointOrder[i];
             var order = orderList[orderIndex];
             stopSequence++;
-            var leg = i < optimizedRoute.Legs.Count ? optimizedRoute.Legs[i] : null;
+            var leg = i < deliveryLoop.Legs.Count ? deliveryLoop.Legs[i] : null;
 
             // Advance running time by leg duration + service time
             if (leg is not null)
@@ -330,5 +440,69 @@ public class RouteOptimizationAgent
         {
             _logger.LogWarning(ex, "Downstream {Label} publish failed (route still persisted).", label);
         }
+    }
+
+    /// <summary>
+    /// Returns "lat,lng" when coordinates are present; falls back to the
+    /// free-form address otherwise. Google Directions accepts both, but
+    /// passing coordinates avoids a server-side geocode lookup on every
+    /// routing call — the whole point of caching them in our DB.
+    /// </summary>
+    private static string BuildRoutePoint(double? lat, double? lng, string fallbackAddress) =>
+        lat.HasValue && lng.HasValue
+            ? FormattableString.Invariant($"{lat.Value:F6},{lng.Value:F6}")
+            : fallbackAddress;
+
+    /// <summary>
+    /// Geocodes a Hub through Google Maps if it has no coordinates and
+    /// persists the result back to the row, so subsequent routing runs
+    /// read from cache instead of calling Google again. Failure to geocode
+    /// is non-fatal — the route still goes out using the address string.
+    /// </summary>
+    private async Task EnsureHubGeocodedAsync(Hub hub, CancellationToken ct)
+    {
+        if (hub.Latitude.HasValue && hub.Longitude.HasValue) return;
+        if (string.IsNullOrWhiteSpace(hub.Address)) return;
+
+        var geo = await _maps.GeocodeAsync(hub.FullAddress, ct);
+        if (geo is null)
+        {
+            _logger.LogWarning("Could not geocode hub {HubId} ({Name}); routing will fall back to address string.",
+                hub.Id, hub.Name);
+            return;
+        }
+
+        hub.Latitude         = geo.Latitude;
+        hub.Longitude        = geo.Longitude;
+        hub.FormattedAddress = geo.FormattedAddress;
+        hub.UpdatedAt        = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct);
+        _logger.LogInformation("Cached geocode for hub {HubId} ({Name}).", hub.Id, hub.Name);
+    }
+
+    /// <summary>
+    /// Same as <see cref="EnsureHubGeocodedAsync"/> but for warehouses.
+    /// Persists the result so we never re-geocode the same warehouse on a
+    /// future routing run.
+    /// </summary>
+    private async Task EnsureWarehouseGeocodedAsync(Warehouse wh, CancellationToken ct)
+    {
+        if (wh.Latitude.HasValue && wh.Longitude.HasValue) return;
+        if (string.IsNullOrWhiteSpace(wh.Address)) return;
+
+        var geo = await _maps.GeocodeAsync(wh.FullAddress, ct);
+        if (geo is null)
+        {
+            _logger.LogWarning("Could not geocode warehouse {WarehouseId} ({Name}); routing will fall back to address string.",
+                wh.Id, wh.BusinessName);
+            return;
+        }
+
+        wh.Latitude         = geo.Latitude;
+        wh.Longitude        = geo.Longitude;
+        wh.FormattedAddress = geo.FormattedAddress;
+        wh.UpdatedAt        = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct);
+        _logger.LogInformation("Cached geocode for warehouse {WarehouseId} ({Name}).", wh.Id, wh.BusinessName);
     }
 }

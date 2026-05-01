@@ -13,7 +13,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$root = $PSScriptRoot
+# Project root is the parent of scripts/. Functions local.settings.json files
+# and the data\ CSVs are looked up relative to it.
+$root = Split-Path -Parent $PSScriptRoot
 
 function Write-Header  { param($msg) Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 function Write-Info    { param($msg) Write-Host "[INFO]  $msg"  -ForegroundColor Cyan }

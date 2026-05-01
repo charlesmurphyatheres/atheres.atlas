@@ -90,6 +90,11 @@ public class QueryAgent
                 o.County,
                 o.District,
                 o.Zone,
+                o.LicenseNumber,
+                o.StoreLicenseNumber,
+                o.Customer,
+                o.SalesOrderNumber,
+                o.PurchaseOrderNumber,
                 o.OrderDate,
                 o.Email,
                 o.Phone,
@@ -177,6 +182,7 @@ public class QueryAgent
         {
             routes = await _db.Routes
                 .Include(r => r.Stops).ThenInclude(s => s.Order)
+                .Include(r => r.Warehouse)
                 .OrderByDescending(r => r.DeliveryDate)
                 .Take(10)
                 .ToListAsync(ct);
@@ -204,54 +210,90 @@ public class QueryAgent
         return new OkObjectResult(MapRoute(route));
     }
 
-    private static object MapRoute(Domain.Entities.DeliveryRoute r) => new
+    private static object MapRoute(Domain.Entities.DeliveryRoute r)
     {
-        r.Id,
-        r.CompanyId,
-        r.TruckId,
-        r.HubId,
-        r.DeliveryDate,
-        r.StartAddress,
-        r.StartLatitude,
-        r.StartLongitude,
-        r.EndAddress,
-        r.EndLatitude,
-        r.EndLongitude,
-        r.TotalStops,
-        r.TotalDistanceMiles,
-        totalDuration = r.TotalDuration.ToString(@"h\:mm"),
-        r.IsOptimized,
-        r.OverviewPolyline,
-        stops = r.Stops.OrderBy(s => s.Sequence).Select(s =>
+        // Warehouse pickup is the route's first physical stop after the hub
+        // (when present). We surface it as a separate field rather than
+        // mixing it into `stops` so existing callers that iterate stops
+        // for delivery confirmations / per-stop status don't have to skip
+        // it. The "estimated arrival at the warehouse" is recoverable from
+        // the first delivery's ETA minus that stop's leg duration: the
+        // optimizer's leg-0 is `Warehouse → first delivery`, so the time
+        // *before* leg-0 starts is the warehouse pickup ETA.
+        object? warehousePickup = null;
+        if (r.Warehouse is not null)
         {
-            // Derive a best-effort confirmation status from the order status
-            var orderStatus = s.Order?.Status;
-            var confirmationStatus = orderStatus switch
-            {
-                OrderStatus.Confirmed => "Confirmed",
-                OrderStatus.Rejected => "Rejected",
-                OrderStatus.ConfirmationPending => "SentEmail",
-                OrderStatus.OutForDelivery or OrderStatus.Delivered or OrderStatus.Archived => "Confirmed",
-                _ => "Pending",
-            };
+            DateTime? warehouseEta = null;
+            var firstStop = r.Stops.OrderBy(s => s.Sequence).FirstOrDefault();
+            if (firstStop?.EstimatedArrival is DateTime eta)
+                warehouseEta = eta.AddSeconds(-firstStop.LegDurationSeconds);
 
-            return new
+            warehousePickup = new
             {
-                s.OrderId,
-                s.Sequence,
-                s.StoreName,
-                s.Address,
-                s.Latitude,
-                s.Longitude,
-                s.EstimatedArrival,
-                orderStatus = orderStatus?.ToString() ?? "Unknown",
-                confirmationStatus,
-                s.LegDistanceMeters,
-                legDistanceMiles = s.LegDistanceMeters * 0.000621371,
-                legDurationMinutes = s.LegDurationSeconds / 60.0,
+                id        = r.Warehouse.Id,
+                name      = string.IsNullOrWhiteSpace(r.Warehouse.AlternateName)
+                                ? r.Warehouse.BusinessName
+                                : r.Warehouse.AlternateName,
+                address   = string.IsNullOrWhiteSpace(r.Warehouse.FormattedAddress)
+                                ? r.Warehouse.FullAddress
+                                : r.Warehouse.FormattedAddress,
+                latitude  = r.Warehouse.Latitude,
+                longitude = r.Warehouse.Longitude,
+                estimatedArrival = warehouseEta,
             };
-        }),
-    };
+        }
+
+        return new
+        {
+            r.Id,
+            r.CompanyId,
+            r.TruckId,
+            r.HubId,
+            r.WarehouseId,
+            warehousePickup,
+            r.DeliveryDate,
+            r.StartAddress,
+            r.StartLatitude,
+            r.StartLongitude,
+            r.EndAddress,
+            r.EndLatitude,
+            r.EndLongitude,
+            r.TotalStops,
+            r.TotalDistanceMiles,
+            totalDuration = r.TotalDuration.ToString(@"h\:mm"),
+            r.IsOptimized,
+            r.OverviewPolyline,
+            stops = r.Stops.OrderBy(s => s.Sequence).Select(s =>
+            {
+                // Derive a best-effort confirmation status from the order status
+                var orderStatus = s.Order?.Status;
+                var confirmationStatus = orderStatus switch
+                {
+                    OrderStatus.Confirmed => "Confirmed",
+                    OrderStatus.Rejected => "Rejected",
+                    OrderStatus.ConfirmationPending => "SentEmail",
+                    OrderStatus.OutForDelivery or OrderStatus.Delivered or OrderStatus.Archived => "Confirmed",
+                    _ => "Pending",
+                };
+
+                return new
+                {
+                    s.OrderId,
+                    s.Sequence,
+                    s.StoreName,
+                    s.Address,
+                    s.Latitude,
+                    s.Longitude,
+                    s.EstimatedArrival,
+                    orderStatus = orderStatus?.ToString() ?? "Unknown",
+                    confirmationStatus,
+                    s.LegDistanceMeters,
+                    legDistanceMiles = s.LegDistanceMeters * 0.000621371,
+                    legDurationMinutes = s.LegDurationSeconds / 60.0,
+                };
+            }),
+        };
+    }
 
     // -----------------------------------------------------------------------
     // GET /api/stores
@@ -362,17 +404,48 @@ public class QueryAgent
             DateTime.TryParse(dateEl.GetString(), out var parsedDate))
             deliveryDate = parsedDate.Date;
 
-        var query = _db.Orders.IgnoreQueryFilters()
+        // Pull every Ordered row first (with optional delivery-date filter),
+        // then split into routable vs. stale. Stale rows (more than a day
+        // old) are flipped to RouteOmitted in place rather than dispatched —
+        // the warehouse has likely already moved on from them, so we record
+        // the omission and don't generate a route request.
+        var allQuery = _db.Orders.IgnoreQueryFilters()
             .Where(o => o.CompanyId == company.Id
-                     && o.Status == OrderStatus.Ordered
-                     && o.Latitude != null
-                     && o.Longitude != null);
+                     && o.Status == OrderStatus.Ordered);
         if (deliveryDate is not null)
-            query = query.Where(o => o.OrderDate.Date == deliveryDate.Value);
+            allQuery = allQuery.Where(o => o.OrderDate.Date == deliveryDate.Value);
 
-        var orders = await query.ToListAsync(ct);
+        var allOrdered = await allQuery.ToListAsync(ct);
+        var nowUtc     = DateTime.UtcNow;
+        var stale      = allOrdered.Where(o => Atheres.Atlas.Domain.Constants.RoutingPolicy.IsTooOldToRoute(o.OrderDate, nowUtc)).ToList();
+        // Routable rows still have to satisfy geocoding — without coords
+        // there's nothing to optimize.
+        var orders     = allOrdered
+            .Except(stale)
+            .Where(o => o.Latitude != null && o.Longitude != null)
+            .ToList();
+
+        if (stale.Count > 0)
+        {
+            foreach (var s in stale)
+            {
+                s.Status    = OrderStatus.RouteOmitted;
+                s.UpdatedAt = nowUtc;
+            }
+            await _db.SaveChangesAsync(ct);
+            _logger.LogInformation(
+                "MarkAllReady: flipped {Count} stale order(s) to RouteOmitted for company {Company}",
+                stale.Count, company.Id);
+        }
+
         if (orders.Count == 0)
-            return new OkObjectResult(new { message = "No routable orders ready to pickup.", routesQueued = 0, totalOrders = 0 });
+            return new OkObjectResult(new
+            {
+                message      = "No routable orders ready to pickup.",
+                routesQueued = 0,
+                totalOrders  = 0,
+                routeOmitted = stale.Count,
+            });
 
         var firstHubId = await _db.Hubs.IgnoreQueryFilters()
             .Where(h => h.CompanyId == company.Id && h.IsActive)
@@ -456,9 +529,10 @@ public class QueryAgent
 
         return new OkObjectResult(new
         {
-            message = "Orders marked ready to pickup. Routing in progress.",
+            message      = "Orders marked ready to pickup. Routing in progress.",
             routesQueued = messages.Count,
-            totalOrders = orders.Count,
+            totalOrders  = orders.Count,
+            routeOmitted = stale.Count,
         });
     }
 

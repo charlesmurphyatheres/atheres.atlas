@@ -25,6 +25,7 @@ namespace Atheres.Atlas.Functions.Agents;
 public class OrderImportAgent
 {
     private readonly AtlasDbContext _db;
+    private readonly Atheres.Atlas.Functions.Services.IRouteScheduler _scheduler;
     private readonly ILogger<OrderImportAgent> _log;
 
     private static readonly JsonSerializerOptions _json = new()
@@ -33,10 +34,14 @@ public class OrderImportAgent
         PropertyNameCaseInsensitive = true,
     };
 
-    public OrderImportAgent(AtlasDbContext db, ILogger<OrderImportAgent> log)
+    public OrderImportAgent(
+        AtlasDbContext db,
+        Atheres.Atlas.Functions.Services.IRouteScheduler scheduler,
+        ILogger<OrderImportAgent> log)
     {
-        _db  = db;
-        _log = log;
+        _db        = db;
+        _scheduler = scheduler;
+        _log       = log;
     }
 
     /// <summary>
@@ -55,6 +60,24 @@ public class OrderImportAgent
 
         if (dto?.Rows is null || dto.Rows.Count == 0)
             return new BadRequestObjectResult(new { error = "No rows provided." });
+
+        // Initial status defaults to Ordered. Operators can also pick
+        // Scheduled, in which case routable rows are routed immediately
+        // through RouteScheduler and stale rows fall through to
+        // RouteOmitted. Anything outside that allowlist is rejected so
+        // typos don't silently produce broken orders.
+        var requestedInitial = OrderStatus.Ordered;
+        if (!string.IsNullOrWhiteSpace(dto.InitialStatus))
+        {
+            if (!Enum.TryParse<OrderStatus>(dto.InitialStatus, ignoreCase: true, out requestedInitial)
+                || (requestedInitial != OrderStatus.Ordered && requestedInitial != OrderStatus.Scheduled))
+            {
+                return new BadRequestObjectResult(new
+                {
+                    error = $"Unsupported initialStatus '{dto.InitialStatus}'. Allowed: Ordered, Scheduled.",
+                });
+            }
+        }
 
         var companyId = GetCallerCompanyId(req);
         if (!companyId.HasValue)
@@ -104,6 +127,32 @@ public class OrderImportAgent
             .Where(s => s.CompanyId == company.Id && storeIds.Contains(s.Id))
             .ToDictionaryAsync(s => s.Id, ct);
 
+        // Pre-fetch every sales-order number that already exists for this
+        // company so we can reject duplicates before issuing INSERTs. Same
+        // sales order = same physical order, so we never want two rows.
+        // Comparison is case-insensitive to match how operators paste
+        // numbers ("SO-123" vs "so-123" should still collide).
+        var batchSalesOrderNumbers = dto.Rows
+            .Select(r => r.SalesOrderNumber?.Trim())
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s!)
+            .ToList();
+
+        var existingSalesOrders = batchSalesOrderNumbers.Count == 0
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(
+                await _db.Orders.IgnoreQueryFilters()
+                    .Where(o => o.CompanyId == company.Id
+                             && o.SalesOrderNumber != null
+                             && batchSalesOrderNumbers.Contains(o.SalesOrderNumber))
+                    .Select(o => o.SalesOrderNumber!)
+                    .ToListAsync(ct),
+                StringComparer.OrdinalIgnoreCase);
+
+        // Track sales orders we've staged in this single import so the
+        // batch can't carry an internal duplicate either.
+        var batchSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         var errors = new List<ImportRowError>();
         var orders = new List<Order>();
 
@@ -129,6 +178,21 @@ public class OrderImportAgent
                 continue;
             }
 
+            var salesOrder = NullIfBlank(row.SalesOrderNumber);
+            if (salesOrder is not null)
+            {
+                if (existingSalesOrders.Contains(salesOrder))
+                {
+                    errors.Add(new ImportRowError(i, $"Sales order '{salesOrder}' already exists for this company."));
+                    continue;
+                }
+                if (!batchSeen.Add(salesOrder))
+                {
+                    errors.Add(new ImportRowError(i, $"Sales order '{salesOrder}' is duplicated within this import."));
+                    continue;
+                }
+            }
+
             // Order address comes from the matched Store, not the CSV. The
             // store has already been geocoded so route optimization gets
             // real coordinates, and "address on the order" stays consistent
@@ -148,7 +212,7 @@ public class OrderImportAgent
                 County              = matchedStore.County ?? string.Empty,
                 LicenseNumber       = matchedStore.LicenseNumber ?? string.Empty,
                 Customer            = NullIfBlank(row.Customer),
-                SalesOrderNumber    = NullIfBlank(row.SalesOrderNumber),
+                SalesOrderNumber    = salesOrder,
                 PurchaseOrderNumber = NullIfBlank(row.PurchaseOrderNumber),
                 Email               = matchedStore.Email ?? string.Empty,
                 Phone               = matchedStore.Phone,
@@ -156,7 +220,15 @@ public class OrderImportAgent
                 Longitude           = matchedStore.Longitude,
                 FormattedAddress    = matchedStore.FormattedAddress,
                 OrderDate           = orderDate,
-                Status              = OrderStatus.Ordered,
+                // When the operator picked Scheduled, route immediately —
+                // unless the order is more than a day old, in which case
+                // we record it as RouteOmitted (consistent with every
+                // other "schedule this" path in the system).
+                Status              = requestedInitial == OrderStatus.Scheduled
+                    ? (RoutingPolicy.IsTooOldToRoute(orderDate, DateTime.UtcNow)
+                        ? OrderStatus.RouteOmitted
+                        : OrderStatus.Scheduled)
+                    : OrderStatus.Ordered,
                 Notes               = "Imported via CSV",
             };
 
@@ -169,14 +241,71 @@ public class OrderImportAgent
         _db.Orders.AddRange(orders);
         await _db.SaveChangesAsync(ct);
 
+        // Single batched optimization run for everything that came in as
+        // Scheduled. RouteScheduler groups by warehouse and chunks per
+        // company.MaxStopsPerRoute, so even a 200-row Scheduled import
+        // produces a small, bounded number of optimization messages —
+        // never one per order.
+        var routesQueued       = 0;
+        var ordersUngeocoded   = 0;
+        var noActiveHub        = false;
+        var storesGeocoded     = 0;
+        var hubsGeocoded       = 0;
+        var warehousesGeocoded = 0;
+        var geocodeFailures    = 0;
+        var routeOmittedCount  = orders.Count(o => o.Status == OrderStatus.RouteOmitted);
+        var freshlyScheduled   = orders.Where(o => o.Status == OrderStatus.Scheduled).ToList();
+        if (freshlyScheduled.Count > 0)
+        {
+            try
+            {
+                var outcome = await _scheduler.EnqueueAsync(freshlyScheduled, company.Id, ct);
+                routesQueued       = outcome.RoutesQueued;
+                ordersUngeocoded   = outcome.OrdersUngeocoded;
+                noActiveHub        = outcome.NoActiveHub;
+                storesGeocoded     = outcome.StoresGeocoded;
+                hubsGeocoded       = outcome.HubsGeocoded;
+                warehousesGeocoded = outcome.WarehousesGeocoded;
+                geocodeFailures    = outcome.GeocodeFailures;
+            }
+            catch (Exception ex)
+            {
+                // Orders are persisted in Scheduled state; failing the
+                // whole call would lose visibility of them. Surface the
+                // error in the response so the operator can retry routing.
+                _log.LogError(ex, "CSV import: scheduler enqueue failed; orders left as Scheduled.");
+                return new ObjectResult(new
+                {
+                    created      = orders.Count,
+                    orderIds     = orders.Select(o => o.Id),
+                    routesQueued = 0,
+                    routeOmitted = routeOmittedCount,
+                    errors,
+                    schedulerError = ex.Message,
+                })
+                { StatusCode = 207 }; // multi-status — partial success
+            }
+        }
+
         _log.LogInformation(
-            "CSV import: {Created} orders created for company {Company} ({Errors} skipped)",
-            orders.Count, company.Id, errors.Count);
+            "CSV import: {Created} orders created for company {Company} ({Errors} skipped, {Routes} run(s) queued, geocoded {Stores}/{Hubs}/{Warehouses} stores/hubs/warehouses, {Ungeocoded} ungeocoded skipped, NoActiveHub={NoHub})",
+            orders.Count, company.Id, errors.Count, routesQueued,
+            storesGeocoded, hubsGeocoded, warehousesGeocoded,
+            ordersUngeocoded, noActiveHub);
 
         return new OkObjectResult(new
         {
-            created  = orders.Count,
-            orderIds = orders.Select(o => o.Id),
+            created            = orders.Count,
+            orderIds           = orders.Select(o => o.Id),
+            routesQueued,
+            ordersUngeocoded,
+            noActiveHub,
+            storesGeocoded,
+            hubsGeocoded,
+            warehousesGeocoded,
+            geocodeFailures,
+            routeOmitted       = routeOmittedCount,
+            initialStatus      = requestedInitial.ToString(),
             errors,
         });
     }
@@ -224,6 +353,14 @@ public class OrderImportAgent
 public class ImportOrdersDto
 {
     public List<ImportedOrderRow> Rows { get; set; } = [];
+
+    /// <summary>
+    /// Optional initial status for every imported row. Defaults to "Ordered".
+    /// "Scheduled" routes the import immediately through RouteScheduler —
+    /// stale rows still fall through to RouteOmitted as everywhere else.
+    /// Other values are rejected with 400.
+    /// </summary>
+    public string? InitialStatus { get; set; }
 }
 
 public class ImportedOrderRow

@@ -5,6 +5,10 @@
 
 $Project = "atheres-atlas"
 
+# docker compose reads docker-compose.yml from cwd. Anchor to the repo root
+# (parent of scripts/) so the script works no matter where it's invoked.
+Set-Location (Split-Path -Parent $PSScriptRoot)
+
 Write-Host "=== Stopping and removing containers, networks, and volumes ===" -ForegroundColor Cyan
 docker compose -p $Project down --volumes --remove-orphans 2>$null
 

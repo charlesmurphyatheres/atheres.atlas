@@ -111,6 +111,17 @@ public class HubFunctions
         try { dto = await JsonSerializer.DeserializeAsync<UpdateHubDto>(req.Body, _json, ct); }
         catch { return new BadRequestObjectResult(new { error = "Invalid JSON." }); }
 
+        // Track address changes so we can invalidate the cached geocode
+        // when the physical location moved. Auth.Functions doesn't talk
+        // to Google Maps directly; nulling the coords here makes the
+        // main Functions' RouteOptimizationAgent re-geocode lazily on
+        // the next routing run and persist the fresh result.
+        var addressChanged =
+            (!string.IsNullOrWhiteSpace(dto?.Address) && !string.Equals(hub.Address, dto.Address, StringComparison.Ordinal))
+            || (dto?.City  is not null && !string.Equals(hub.City,  dto.City,  StringComparison.Ordinal))
+            || (dto?.State is not null && !string.Equals(hub.State, dto.State, StringComparison.Ordinal))
+            || (dto?.Zip   is not null && !string.Equals(hub.Zip,   dto.Zip,   StringComparison.Ordinal));
+
         if (!string.IsNullOrWhiteSpace(dto?.Name))    hub.Name    = dto.Name;
         if (!string.IsNullOrWhiteSpace(dto?.Address)) hub.Address = dto.Address;
         if (dto?.City is not null)                     hub.City    = dto.City;
@@ -118,10 +129,17 @@ public class HubFunctions
         if (dto?.Zip is not null)                      hub.Zip     = dto.Zip;
         if (dto?.IsActive is not null)                 hub.IsActive = dto.IsActive.Value;
 
+        if (addressChanged)
+        {
+            hub.Latitude         = null;
+            hub.Longitude        = null;
+            hub.FormattedAddress = null;
+        }
+
         hub.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct);
 
-        return new OkObjectResult(new { message = "Hub updated." });
+        return new OkObjectResult(new { message = "Hub updated.", regeocodeQueued = addressChanged });
     }
 
     [Function("hubs-deactivate")]

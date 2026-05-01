@@ -5,6 +5,7 @@ import {
   getStores,
   importOrders,
   type CreateStorePayload,
+  type ImportInitialStatus,
   type ImportOrdersResult,
   type ImportedOrderRow,
   type StoreLite,
@@ -75,6 +76,10 @@ export default function OrderImportPanel() {
   const [submitting, setSubmitting] = useState(false)
   const [result, setResult] = useState<ImportOrdersResult | null>(null)
   const [submitError, setSubmitError] = useState('')
+  // Default new orders to Ordered. Picking Scheduled here triggers a single
+  // batched route-optimization run for everything that gets imported as
+  // Scheduled (stale rows still fall through to RouteOmitted server-side).
+  const [initialStatus, setInitialStatus] = useState<ImportInitialStatus>('Ordered')
 
   // Stores keyed by license number for fast match lookup. Refreshed when the
   // operator creates a new Store inline so that row immediately flips to
@@ -204,7 +209,7 @@ export default function OrderImportPanel() {
         return
       }
 
-      const res = await importOrders(payload)
+      const res = await importOrders(payload, initialStatus)
       setResult(res)
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Import failed.'
@@ -297,6 +302,18 @@ export default function OrderImportPanel() {
               )}
               {duplicates.size > 0 && <span className="text-amber-600">Duplicate field mapping detected.</span>}
               <span className="text-gray-400 text-xs">from <span className="font-mono">{parsed.fileName}</span></span>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-gray-600">Initial status</label>
+              <select
+                value={initialStatus}
+                onChange={(e) => setInitialStatus(e.target.value as ImportInitialStatus)}
+                className="text-sm border border-gray-300 rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-brand-400"
+                title="Pick Scheduled to route the imported orders immediately."
+              >
+                <option value="Ordered">Ordered</option>
+                <option value="Scheduled">Scheduled (route now)</option>
+              </select>
             </div>
             <button
               onClick={handleImport}
@@ -718,15 +735,53 @@ function Field({ label, value, onChange }: { label: string; value: string; onCha
 // ---- Result ----------------------------------------------------------------
 
 function ImportResultCard({ result }: { result: ImportOrdersResult }) {
-  const hasErrors = result.errors.length > 0
+  const hasErrors    = result.errors.length > 0
+  const routes       = result.routesQueued      ?? 0
+  const omitted      = result.routeOmitted      ?? 0
+  const stores       = result.storesGeocoded    ?? 0
+  const hubs         = result.hubsGeocoded      ?? 0
+  const warehouses   = result.warehousesGeocoded ?? 0
+  const failures     = result.geocodeFailures   ?? 0
+  const ungeocoded   = result.ordersUngeocoded  ?? 0
+  const geocodeBits: string[] = []
+  if (stores     > 0) geocodeBits.push(`${stores} store${stores === 1 ? '' : 's'}`)
+  if (hubs       > 0) geocodeBits.push(`${hubs} hub${hubs === 1 ? '' : 's'}`)
+  if (warehouses > 0) geocodeBits.push(`${warehouses} warehouse${warehouses === 1 ? '' : 's'}`)
   return (
     <div className={`rounded-xl border p-4 space-y-2 ${
       hasErrors ? 'bg-amber-50 border-amber-200' : 'bg-green-50 border-green-200'
     }`}>
       <p className="text-sm font-semibold text-gray-800">
         Imported {result.created} order{result.created === 1 ? '' : 's'}
-        {hasErrors ? `, ${result.errors.length} skipped` : '.'}
+        {hasErrors ? `, ${result.errors.length} skipped.` : '.'}
       </p>
+      {geocodeBits.length > 0 && (
+        <p className="text-xs text-gray-700">
+          Geocoded <strong>{geocodeBits.join(', ')}</strong> via Google Maps (cached for next time).
+        </p>
+      )}
+      {(routes > 0 || omitted > 0 || ungeocoded > 0 || failures > 0) && (
+        <p className="text-xs text-gray-700">
+          {routes > 0 && (
+            <>Queued <strong>{routes}</strong> optimization run{routes === 1 ? '' : 's'}. </>
+          )}
+          {omitted > 0 && (
+            <span className="text-stone-600">
+              {omitted} order{omitted === 1 ? '' : 's'} marked Route Omitted (more than a day old).{' '}
+            </span>
+          )}
+          {ungeocoded > 0 && (
+            <span className="text-amber-700">
+              {ungeocoded} order{ungeocoded === 1 ? '' : 's'} still missing a geocode — check the source address.{' '}
+            </span>
+          )}
+          {failures > 0 && (
+            <span className="text-red-700">
+              {failures} address{failures === 1 ? '' : 'es'} couldn't be resolved by Google.
+            </span>
+          )}
+        </p>
+      )}
       {hasErrors && (
         <ul className="text-xs text-gray-700 list-disc pl-5 space-y-0.5">
           {result.errors.slice(0, 25).map((e) => (

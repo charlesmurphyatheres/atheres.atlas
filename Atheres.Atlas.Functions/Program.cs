@@ -72,6 +72,13 @@ var host = new HostBuilder()
         // DirectOptimizer=true (dev fallback for when Service Bus is unreachable).
         services.AddScoped<Atheres.Atlas.Functions.Agents.RouteOptimizationAgent>();
 
+        // Centralised route-enqueue helper used by every "these orders just
+        // became Scheduled" entry point (ManagementAgent bulk + single
+        // status flip, OrderImportAgent's initial-Scheduled imports, etc.)
+        // so they share one batching/chunking implementation instead of
+        // each fanning out per-order optimization requests.
+        services.AddScoped<IRouteScheduler, RouteScheduler>();
+
         // ---- Azure Service Bus ---------------------------------------------
         var serviceBusConnection = Environment.GetEnvironmentVariable("ServiceBusConnection")
             ?? throw new InvalidOperationException("ServiceBusConnection is required.");

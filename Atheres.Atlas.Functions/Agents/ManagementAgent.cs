@@ -2,6 +2,8 @@ using System.Net;
 using System.Text.Json;
 using Atheres.Atlas.Data;
 using Atheres.Atlas.Data.Repositories;
+using Atheres.Atlas.Domain.Constants;
+using Atheres.Atlas.Domain.Entities;
 using Atheres.Atlas.Domain.Enums;
 using Atheres.Atlas.Domain.Messages;
 using Atheres.Atlas.Functions.Services;
@@ -27,6 +29,7 @@ public class ManagementAgent
     private readonly IServiceBusPublisher _bus;
     private readonly AtlasDbContext _db;
     private readonly IGoogleMapsService _maps;
+    private readonly IRouteScheduler _scheduler;
     private readonly ILogger<ManagementAgent> _logger;
 
     public ManagementAgent(
@@ -35,14 +38,16 @@ public class ManagementAgent
         IServiceBusPublisher bus,
         AtlasDbContext db,
         IGoogleMapsService maps,
+        IRouteScheduler scheduler,
         ILogger<ManagementAgent> logger)
     {
-        _orders = orders;
-        _routes = routes;
-        _bus = bus;
-        _db = db;
-        _maps = maps;
-        _logger = logger;
+        _orders    = orders;
+        _routes    = routes;
+        _bus       = bus;
+        _db        = db;
+        _maps      = maps;
+        _scheduler = scheduler;
+        _logger    = logger;
     }
 
     private static readonly JsonSerializerOptions _json = new() { PropertyNameCaseInsensitive = true };
@@ -238,10 +243,11 @@ public class ManagementAgent
     }
 
     // -----------------------------------------------------------------------
-    // PATCH /api/orders/{id}/status  (Admin / Logistics)
+    // PATCH /api/orders/{id}/status  (Admin / Logistics / OrderImporter)
     // Body: { "status": "Delivered" }
     // -----------------------------------------------------------------------
     [Function("mgmt-order-set-status")]
+    [Authorize(Roles = "Admin,SuperAdmin,Logistics,OrderImporter")]
     public async Task<IActionResult> SetOrderStatus(
         [HttpTrigger(AuthorizationLevel.Anonymous, "patch", Route = "orders/{id}/status")]
         HttpRequest req,
@@ -269,20 +275,235 @@ public class ManagementAgent
         if (order is null)
             return new NotFoundObjectResult(new { error = "Order not found." });
 
+        // Stale orders never enter the routing pipeline. If an operator
+        // tries to flip one to Scheduled, rewrite the target to RouteOmitted
+        // so the row is taken out of contention immediately rather than
+        // waiting for a downstream consumer to reject it.
+        var effective = status;
+        if (status == OrderStatus.Scheduled
+            && RoutingPolicy.IsTooOldToRoute(order.OrderDate, DateTime.UtcNow))
+        {
+            effective = OrderStatus.RouteOmitted;
+        }
+
         var previous = order.Status.ToString();
-        order.Status = status;
+        order.Status = effective;
         await _orders.UpdateAsync(order, ct);
         await _orders.SaveChangesAsync(ct);
 
-        _logger.LogInformation("Order {OrderId} status manually set to {Status}", orderId, status);
+        _logger.LogInformation(
+            "Order {OrderId} status manually set to {Status}{RewriteNote}",
+            orderId, effective,
+            effective != status ? $" (requested {status}; order >24h old)" : string.Empty);
 
         await _bus.PublishAsync(ServiceBusQueues.Audit, new AuditMessage(
             AuditEventType.OrderStatusChanged, nameof(ManagementAgent),
             order.CompanyId, order.Id, null,
-            previous, status.ToString(),
-            "Manual status update via admin panel", true, null, DateTime.UtcNow), ct);
+            previous, effective.ToString(),
+            effective != status
+                ? $"Manual status update — requested {status}, rewritten to {effective} (order >24h old)"
+                : "Manual status update via admin panel",
+            true, null, DateTime.UtcNow), ct);
 
-        return new OkObjectResult(new { orderId, status = status.ToString() });
+        // Newly-Scheduled rows trigger a single optimization run through
+        // the shared RouteScheduler. The scheduler does its own
+        // geocode-then-backfill pass before publishing route messages, so
+        // an old order pointing at an ungeocoded store gets its coords
+        // resolved automatically — no separate prep step required here.
+        RouteEnqueueResult? schedulerResult = null;
+        if (effective == OrderStatus.Scheduled)
+        {
+            schedulerResult = await _scheduler.EnqueueAsync(new[] { order }, order.CompanyId, ct);
+        }
+
+        return new OkObjectResult(new
+        {
+            orderId,
+            status              = effective.ToString(),
+            requestedStatus     = status.ToString(),
+            rewrittenAsStale    = effective != status,
+            routesQueued        = schedulerResult?.RoutesQueued       ?? 0,
+            ordersUngeocoded    = schedulerResult?.OrdersUngeocoded   ?? 0,
+            noActiveHub         = schedulerResult?.NoActiveHub        ?? false,
+            storesGeocoded      = schedulerResult?.StoresGeocoded     ?? 0,
+            hubsGeocoded        = schedulerResult?.HubsGeocoded       ?? 0,
+            warehousesGeocoded  = schedulerResult?.WarehousesGeocoded ?? 0,
+            geocodeFailures     = schedulerResult?.GeocodeFailures    ?? 0,
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // PATCH /api/orders/status   (Admin / Logistics / OrderImporter)
+    // Body: { "orderIds": ["...","..."], "status": "Delivered" }
+    //
+    // Bulk variant of mgmt-order-set-status — applies the same status to
+    // every order id supplied. Each row is updated and audited individually
+    // so partial failure is observable: returns per-id results in a list.
+    // The whole call uses a single SaveChanges for efficiency.
+    // -----------------------------------------------------------------------
+    [Function("mgmt-orders-bulk-set-status")]
+    [Authorize(Roles = "Admin,SuperAdmin,Logistics,OrderImporter")]
+    public async Task<IActionResult> BulkSetOrderStatus(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "patch", Route = "orders/status")]
+        HttpRequest req,
+        CancellationToken ct)
+    {
+        Guid[] ids;
+        OrderStatus status;
+        try
+        {
+            using var doc = await JsonDocument.ParseAsync(req.Body, cancellationToken: ct);
+            var statusStr = doc.RootElement.GetProperty("status").GetString();
+            if (!Enum.TryParse<OrderStatus>(statusStr, out status))
+                return new BadRequestObjectResult(new { error = $"Unknown status '{statusStr}'." });
+
+            var idsEl = doc.RootElement.GetProperty("orderIds");
+            ids = idsEl.EnumerateArray()
+                .Select(e => Guid.TryParse(e.GetString(), out var g) ? g : Guid.Empty)
+                .Where(g => g != Guid.Empty)
+                .Distinct()
+                .ToArray();
+        }
+        catch
+        {
+            return new BadRequestObjectResult(new { error = "Body must be { \"orderIds\": [...], \"status\": \"...\" }" });
+        }
+
+        if (ids.Length == 0)
+            return new BadRequestObjectResult(new { error = "orderIds must not be empty." });
+
+        // Pre-load every requested order in one round-trip. Tenant scoping
+        // is enforced by the AtlasDbContext query filter, so an OrderImporter
+        // can't flip orders that don't belong to their company even if they
+        // forge an id in the request.
+        var orders = await _db.Orders
+            .Where(o => ids.Contains(o.Id))
+            .ToListAsync(ct);
+
+        var nowUtc           = DateTime.UtcNow;
+        var results          = new List<object>();
+        // Collect every order that ends up in Scheduled state so we can
+        // hand the whole set to RouteScheduler at the end — one batched
+        // optimization run instead of one per order.
+        var scheduledOrders  = new List<Atheres.Atlas.Domain.Entities.Order>();
+        foreach (var orderId in ids)
+        {
+            var order = orders.FirstOrDefault(o => o.Id == orderId);
+            if (order is null)
+            {
+                results.Add(new { orderId, ok = false, error = "Not found." });
+                continue;
+            }
+
+            // Same staleness guard as the single-update endpoint: an
+            // attempt to flip a >24h-old row to Scheduled is rewritten to
+            // RouteOmitted so it never enters the optimization pipeline.
+            var effective = status;
+            if (status == OrderStatus.Scheduled
+                && RoutingPolicy.IsTooOldToRoute(order.OrderDate, nowUtc))
+            {
+                effective = OrderStatus.RouteOmitted;
+            }
+
+            var previous = order.Status.ToString();
+            order.Status    = effective;
+            order.UpdatedAt = nowUtc;
+
+            if (effective == OrderStatus.Scheduled)
+                scheduledOrders.Add(order);
+
+            // Fire-and-forget audit message per row so the audit log mirrors
+            // single-update behavior. Failure to publish doesn't roll back
+            // the status change — we treat the audit pipeline the same way
+            // single-update does.
+            try
+            {
+                await _bus.PublishAsync(ServiceBusQueues.Audit, new AuditMessage(
+                    AuditEventType.OrderStatusChanged, nameof(ManagementAgent),
+                    order.CompanyId, order.Id, null,
+                    previous, effective.ToString(),
+                    effective != status
+                        ? $"Bulk status update — requested {status}, rewritten to {effective} (order >24h old)"
+                        : "Bulk status update via admin panel",
+                    true, null, nowUtc), ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Bulk set-status: audit publish failed for {OrderId}", orderId);
+            }
+
+            results.Add(new
+            {
+                orderId,
+                ok               = true,
+                status           = effective.ToString(),
+                rewrittenAsStale = effective != status,
+            });
+        }
+
+        await _db.SaveChangesAsync(ct);
+
+        var updated      = results.Count(r => (bool)r.GetType().GetProperty("ok")!.GetValue(r)!);
+        var routeOmitted = results.Count(r =>
+        {
+            var prop = r.GetType().GetProperty("rewrittenAsStale");
+            return prop is not null && (bool)(prop.GetValue(r) ?? false);
+        });
+
+        // One optimization run per company-tenant present in the batch.
+        // RouteScheduler internally:
+        //   1. Geocodes every store/warehouse/hub it needs that's missing
+        //      coordinates and persists the result (so future runs skip
+        //      Google entirely).
+        //   2. Back-fills coords from store onto orders that lack them.
+        //   3. Groups by warehouse, chunks per company.MaxStopsPerRoute,
+        //      and publishes one optimization message per chunk.
+        // So an operator ticking 50 orders and clicking Apply Scheduled
+        // does the full prep + route generation in a single click.
+        var routesQueued       = 0;
+        var ordersUngeocoded   = 0;
+        var noActiveHub        = false;
+        var storesGeocoded     = 0;
+        var hubsGeocoded       = 0;
+        var warehousesGeocoded = 0;
+        var geocodeFailures    = 0;
+        if (scheduledOrders.Count > 0)
+        {
+            foreach (var byCompany in scheduledOrders.GroupBy(o => o.CompanyId))
+            {
+                var outcome = await _scheduler.EnqueueAsync(
+                    byCompany.ToList(), byCompany.Key, ct);
+                routesQueued       += outcome.RoutesQueued;
+                ordersUngeocoded   += outcome.OrdersUngeocoded;
+                noActiveHub        |= outcome.NoActiveHub;
+                storesGeocoded     += outcome.StoresGeocoded;
+                hubsGeocoded       += outcome.HubsGeocoded;
+                warehousesGeocoded += outcome.WarehousesGeocoded;
+                geocodeFailures    += outcome.GeocodeFailures;
+            }
+        }
+
+        _logger.LogInformation(
+            "Bulk status update: {Updated}/{Total} orders to {Status} ({RouteOmitted} → RouteOmitted, {Routes} run(s) queued, geocoded {Stores}/{Hubs}/{Warehouses} stores/hubs/warehouses, {Ungeocoded} ungeocoded skipped, NoActiveHub={NoHub})",
+            updated, ids.Length, status, routeOmitted, routesQueued,
+            storesGeocoded, hubsGeocoded, warehousesGeocoded,
+            ordersUngeocoded, noActiveHub);
+
+        return new OkObjectResult(new
+        {
+            requested          = ids.Length,
+            updated,
+            status             = status.ToString(),
+            routeOmitted,
+            routesQueued,
+            ordersUngeocoded,
+            noActiveHub,
+            storesGeocoded,
+            hubsGeocoded,
+            warehousesGeocoded,
+            geocodeFailures,
+            results,
+        });
     }
 
     // -----------------------------------------------------------------------

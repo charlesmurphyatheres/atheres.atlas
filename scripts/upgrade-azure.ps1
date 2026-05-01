@@ -37,7 +37,9 @@ trap { Write-Host "`n  Script failed: $($_.Exception.Message)" -ForegroundColor 
 $upgradeStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 # ---- Static configuration (must match deploy-azure.ps1) ----------------------
-$ProjectRoot         = $PSScriptRoot
+# Project root is the parent of scripts/. Frontend / Functions project folders
+# all live under it.
+$ProjectRoot         = Split-Path -Parent $PSScriptRoot
 $ResourceGroup       = "rg-atheres-atlas"
 $FuncAppMain         = "func-atlas-main"
 $FuncAppAuth         = "func-atlas-auth"

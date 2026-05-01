@@ -8,7 +8,7 @@
       "Bash(docker run --rm --entrypoint bash atheres-atlas_migrations -c \":*)",
       "Bash(npm install:*)",
       "Bash(ls \"c:/development/Atheres.Atlas/Atheres.Atlas.Functions/bin/output/\"*.json)",
-      "Bash(pwsh -File import-data.ps1)"
+      "Bash(pwsh -File scripts/import-data.ps1)"
     ]
   }
 }

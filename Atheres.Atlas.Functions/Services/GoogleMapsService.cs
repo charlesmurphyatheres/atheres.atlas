@@ -59,17 +59,18 @@ public class GoogleMapsService : IGoogleMapsService
         CancellationToken ct = default)
     {
         var waypointList = waypoints.ToList();
-        if (waypointList.Count == 0)
-        {
-            _logger.LogWarning("No waypoints provided for route optimization.");
-            return null;
-        }
 
-        var waypointParam = "optimize:true|" + string.Join("|", waypointList.Select(Uri.EscapeDataString));
+        // Empty waypoints means "give me a simple A→B route" — used for the
+        // pre-pickup hub→warehouse leg, where the driver isn't doing any
+        // deliveries yet. We keep returning an OptimizedRoute (with an
+        // empty WaypointOrder) so the caller can stitch its distance and
+        // duration onto a subsequent optimized delivery loop.
         var url = $"https://maps.googleapis.com/maps/api/directions/json" +
                   $"?origin={Uri.EscapeDataString(origin)}" +
                   $"&destination={Uri.EscapeDataString(destination)}" +
-                  $"&waypoints={waypointParam}" +
+                  (waypointList.Count > 0
+                      ? "&waypoints=optimize:true|" + string.Join("|", waypointList.Select(Uri.EscapeDataString))
+                      : string.Empty) +
                   $"&key={_apiKey}";
 
         try

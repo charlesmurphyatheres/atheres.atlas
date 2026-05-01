@@ -265,7 +265,7 @@ static async Task SeedAsync(IServiceProvider services)
 /// account's username is "data_{slug-of-business-name}@{emailDomain}".
 /// Idempotent: skips warehouses whose corresponding email already exists.
 /// No-op when the company has no warehouses yet (warehouses are loaded
-/// out-of-band by import-data.ps1, not in this seed).
+/// out-of-band by scripts/import-data.ps1, not in this seed).
 /// </summary>
 static async Task SeedWarehouseImportersAsync(
     AtlasDbContext db,
@@ -287,7 +287,7 @@ static async Task SeedWarehouseImportersAsync(
     {
         logger.LogInformation(
             "Seed: no warehouses for company {Company} — skipping OrderImporter seed. "
-            + "Run import-data.ps1 to load warehouses, then restart the Auth Functions to seed importers.",
+            + "Run scripts/import-data.ps1 to load warehouses, then restart the Auth Functions to seed importers.",
             companyId);
         return;
     }

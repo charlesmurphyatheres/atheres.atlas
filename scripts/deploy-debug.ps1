@@ -28,7 +28,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$root = $PSScriptRoot
+# Project root is the parent of scripts/ — every path the script computes
+# (project bin folders, data CSVs, .debug-pids, etc.) anchors there.
+$root = Split-Path -Parent $PSScriptRoot
 $pidFile = Join-Path $root ".debug-pids"
 
 # ---- Deployment timer ---------------------------------------
@@ -384,7 +386,7 @@ if (-not $SkipMigrations) {
 
 # ---- Import reference data (direct SQL — no API dependency) -----
 if (-not $SkipMigrations) {
-    $importScript = Join-Path $root "import-data.ps1"
+    $importScript = Join-Path $PSScriptRoot "import-data.ps1"
     if (Test-Path $importScript) {
         Write-Header "Importing reference data"
         & $importScript
@@ -492,6 +494,12 @@ asrs-emulator start --port 8888 --config '$signalrSettings'
 }
 
 # ---- Start Functions (port 7071) ----------------------------
+# Both Functions projects reference Atheres.Atlas.Data, and `func start`
+# triggers its own MSBuild before launching the host. If both windows fire
+# at the same time, they race for Atheres.Atlas.Data\obj\...\Atheres.Atlas.Data.dll
+# (CS2012 file-lock error). We serialize: start the main Functions, poll
+# until 7071 is responsive (its build has completed), THEN start Auth.
+# Each host does its own full build — we only stagger the launches.
 Write-Header "Starting Atheres.Atlas.Functions on port 7071"
 
 $debugFlag = if ($WaitDebugger) { "--dotnet-isolated-debug" } else { "" }
@@ -510,6 +518,26 @@ func start --port 7071 $debugFlag
 $funcProc = Start-Process pwsh -ArgumentList "-NoExit", "-Command", $funcScript -PassThru
 $trackedPids += $funcProc.Id
 Write-Ok "Functions started (PID: $($funcProc.Id))"
+
+# Wait for the main Functions host to bind 7071 before launching Auth.
+# We don't care if it returns 401/404 — we just need the listener to be up,
+# which means MSBuild has finished and released the Data.dll lock.
+Write-Info "Waiting for port 7071 to bind before launching Auth Functions..."
+$waitedSeconds = 0
+$bound = $false
+while (-not $bound -and $waitedSeconds -lt 90) {
+    try {
+        $tcp = Test-NetConnection -ComputerName "localhost" -Port 7071 -InformationLevel Quiet -WarningAction SilentlyContinue
+        if ($tcp) { $bound = $true; break }
+    } catch { }
+    Start-Sleep 2
+    $waitedSeconds += 2
+    Write-Host "." -NoNewline
+}
+Write-Host ""
+if (-not $bound) {
+    Write-Warn "Port 7071 not bound after ${waitedSeconds}s. Continuing anyway — the Auth build may still race."
+}
 
 # ---- Start Auth Functions (port 7072) -----------------------
 Write-Header "Starting Atheres.Atlas.Auth.Functions on port 7072"
@@ -599,7 +627,7 @@ if (-not $WaitDebugger) {
 
     # ---- Import Secure Transport hubs/vans (companies + users already seeded in code) ----
     if (-not $SkipMigrations) {
-        $seedScript = Join-Path $root "seed-secure-transport.ps1"
+        $seedScript = Join-Path $PSScriptRoot "seed-secure-transport.ps1"
         if (Test-Path $seedScript) {
             Write-Header "Importing Secure Transport data"
             & $seedScript
@@ -662,8 +690,7 @@ Write-Host ""
 
 # Open browsers and credentials
 if (-not $NoFrontend -and -not $WaitDebugger) {
-    $credFile = Join-Path $root "CREDENTIALS.txt"
+    $credFile = Join-Path $PSScriptRoot "CREDENTIALS.txt"
     if (Test-Path $credFile) { Start-Process $credFile }
     Start-Process "http://localhost:3000"
-    Start-Process "http://localhost:3001"
 }

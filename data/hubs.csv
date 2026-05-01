@@ -1,5 +1,5 @@
-﻿ID,Name,Address,City,State,Zip
-HUB_PEK,Pekin,840 Brenkman DR,Pekin,IL,61554
-HUB_SPR,Springfield,3025 Lindbergh BLVD,Springfield,IL,60008
-HUB_ROL,Rolling Meadows,3601 W Algonquin RD,Rolling Meadows,IL,60008
-HUB_ROM,Romeoville Transfer Site,649 Parkwood AVE,Romeoville,IL,60446
+ID,Name,Address,City,State,Zip,Latitude,Longitude
+HUB_PEK,Pekin,840 Brenkman DR,Pekin,IL,61554,40.597997,-89.6346139
+HUB_SPR,Springfield,3025 Lindbergh BLVD,Springfield,IL,60008,39.754221,-89.7116126
+HUB_ROL,Rolling Meadows,3601 W Algonquin RD,Rolling Meadows,IL,60008,42.0606625,-88.0248058
+HUB_ROM,Romeoville Transfer Site,649 Parkwood AVE,Romeoville,IL,60446,41.653092,-88.07583

@@ -273,8 +273,12 @@ function Invoke-Diagnostics {
 # 1. CONFIGURATION -- fill in before running
 # =============================================================
 
+# Project root is the parent of scripts/. .env, project bin folders, etc.
+# all anchor on it.
+$_repoRoot = Split-Path -Parent $PSScriptRoot
+
 # Load secrets from .env (git-ignored)
-$_envFile = Join-Path $PSScriptRoot ".env"
+$_envFile = Join-Path $_repoRoot ".env"
 $_envVars = @{}
 if (Test-Path $_envFile) {
     Get-Content $_envFile | Where-Object { $_ -match '^\s*[^#]' -and $_ -match '=' } | ForEach-Object {
@@ -709,6 +713,9 @@ Set-FunctionAppAppSettings -AppName $FuncAppAuth -Settings @{
     JwtRefreshExpiryDays                  = $JwtRefreshDays
     SeedAdminEmail                        = $SeedAdminEmail
     SeedAdminPassword                     = $SeedAdminPassword
+    SendGridApiKey                        = $SendGridApiKey
+    SendGridFromEmail                     = $SendGridFromEmail
+    SendGridFromName                      = $SendGridFromName
     APPLICATIONINSIGHTS_CONNECTION_STRING = $AppInsightsConnStr
     ASPNETCORE_ENVIRONMENT                = "Production"
 }
@@ -1033,7 +1040,9 @@ if ($validated) {
 # =============================================================
 
 Write-Host "`n=== Running EF Migrations ===" -ForegroundColor Cyan
-$ProjectRoot = $PSScriptRoot
+# ProjectRoot is the repo root (parent of scripts/) — everything beyond
+# this point assumes paths like "Atheres.Atlas.Functions" are siblings of it.
+$ProjectRoot = $_repoRoot
 
 # Both startup projects' Program.cs validate required env vars during host
 # build. `dotnet ef` spins the host up just far enough to resolve the
@@ -1145,7 +1154,7 @@ Write-Host "  Auth Functions is responding; startup seed has populated Companies
 # Import reference data (Stores, Warehouses, Hubs, Vans) -- safe now that the
 # Secure Transport company row exists.
 Write-Host "`n=== Importing Reference Data ===" -ForegroundColor Cyan
-$importScript = Join-Path $ProjectRoot "import-data.ps1"
+$importScript = Join-Path $PSScriptRoot "import-data.ps1"
 if (Test-Path $importScript) {
     pwsh -File $importScript -ConnectionString $SqlConnectionString
     if ($LASTEXITCODE -ne 0) { throw "import-data.ps1 failed (exit $LASTEXITCODE)." }
@@ -1185,7 +1194,7 @@ try {
     $mainAppUrl = "https://$FrontDoorHostname"
 }
 # ---- Append the Azure URLs + users to CREDENTIALS.txt --------
-$credsFile = Join-Path $ProjectRoot "CREDENTIALS.txt"
+$credsFile = Join-Path $PSScriptRoot "CREDENTIALS.txt"
 $bootstrapLine = if ([string]::IsNullOrWhiteSpace($SeedAdminPassword)) {
     "  SuperAdmin      charles.murphy@atheres.com     (not seeded)           (all companies)"
 } else {

@@ -133,6 +133,15 @@ public class WarehouseFunctions
         try { dto = await JsonSerializer.DeserializeAsync<UpdateWarehouseDto>(req.Body, _json, ct); }
         catch { return new BadRequestObjectResult(new { error = "Invalid JSON." }); }
 
+        // Same idea as HubFunctions: when address changes, drop the cached
+        // geocode so RouteOptimizationAgent re-fetches and re-persists on
+        // the next routing run.
+        var addressChanged =
+            (!string.IsNullOrWhiteSpace(dto?.Address) && !string.Equals(warehouse.Address, dto.Address, StringComparison.Ordinal))
+            || (dto?.City  is not null && !string.Equals(warehouse.City,  dto.City,  StringComparison.Ordinal))
+            || (dto?.State is not null && !string.Equals(warehouse.State, dto.State, StringComparison.Ordinal))
+            || (dto?.Zip   is not null && !string.Equals(warehouse.Zip,   dto.Zip,   StringComparison.Ordinal));
+
         if (!string.IsNullOrWhiteSpace(dto?.BusinessName))  warehouse.BusinessName  = dto.BusinessName;
         if (dto?.AlternateName is not null)                 warehouse.AlternateName = dto.AlternateName;
         if (!string.IsNullOrWhiteSpace(dto?.Address))      warehouse.Address       = dto.Address;
@@ -142,6 +151,13 @@ public class WarehouseFunctions
         if (dto?.LicenseNumber is not null)                 warehouse.LicenseNumber = dto.LicenseNumber;
         if (dto?.LegacyLicenseNumber is not null)           warehouse.LegacyLicenseNumber = dto.LegacyLicenseNumber;
         if (dto?.IsActive is not null)                      warehouse.IsActive      = dto.IsActive.Value;
+
+        if (addressChanged)
+        {
+            warehouse.Latitude         = null;
+            warehouse.Longitude        = null;
+            warehouse.FormattedAddress = null;
+        }
 
         // Weekly pickup schedule
         if (dto?.MondayPickupTime is not null)    warehouse.MondayPickupTime    = ParseTime(dto.MondayPickupTime);
@@ -155,7 +171,7 @@ public class WarehouseFunctions
         warehouse.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct);
 
-        return new OkObjectResult(new { message = "Warehouse updated." });
+        return new OkObjectResult(new { message = "Warehouse updated.", regeocodeQueued = addressChanged });
     }
 
     // -----------------------------------------------------------------------

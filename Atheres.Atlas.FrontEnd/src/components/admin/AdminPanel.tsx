@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { getUsers, registerUser, deactivateUser, getOrders, updateOrderStatus, getRoutes, getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse, getHubs, createHub, updateHub, deleteHub, getTrucks, createTruck, updateTruck, deleteTruck } from '../../services/apiService'
+import { getUsers, registerUser, deactivateUser, getOrders, updateOrderStatus, bulkUpdateOrderStatus, getRoutes, getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse, getHubs, createHub, updateHub, deleteHub, getTrucks, createTruck, updateTruck, deleteTruck } from '../../services/apiService'
+import BulkStatusBar from '../ui/BulkStatusBar'
+import { summarizeBulkStatusResult } from '../ui/bulkStatusSummary'
 import { TRUCK_STATUSES, type TruckStatus } from '../../types'
 import { useSortedRows } from '../../hooks/useSortedRows'
 import { SortHeader } from '../ui/SortHeader'
@@ -54,6 +56,7 @@ function OrdersTab() {
   const [orders, setOrders] = useState<Order[]>([])
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState('')
+  const [selected, setSelected] = useState<Set<string>>(new Set())
   const { sorted: sortedOrders, sortKey, sortDir, toggle } = useSortedRows(orders, {
     accessors: {
       address:      (o) => `${o.address ?? ''}, ${o.city ?? ''}`,
@@ -67,6 +70,7 @@ function OrdersTab() {
 
   async function load() {
     setLoading(true)
+    setSelected(new Set())
     try {
       const result = await getOrders({ status: statusFilter || undefined, pageSize: 50 })
       setOrders(result.items)
@@ -75,12 +79,73 @@ function OrdersTab() {
     }
   }
 
+  // Optimistic per-row status change. Reverts on failure so a transient
+  // backend error doesn't leave the grid out-of-sync with reality.
   async function handleStatusChange(orderId: string, newStatus: string) {
-    await updateOrderStatus(orderId, newStatus)
+    const previous = orders.find((o) => o.id === orderId)?.status
     setOrders((prev) => prev.map((o) => o.id === orderId ? { ...o, status: newStatus as Order['status'] } : o))
+    try {
+      await updateOrderStatus(orderId, newStatus)
+    } catch {
+      if (previous) {
+        setOrders((prev) => prev.map((o) => o.id === orderId ? { ...o, status: previous } : o))
+      }
+      alert('Failed to update order status.')
+    }
   }
 
-  const statusOptions = ['Ordered', 'Scheduled', 'RouteOptimized', 'ConfirmationPending', 'Confirmed', 'Rejected', 'OutForDelivery', 'Delivered', 'Archived', 'Cancelled']
+  function toggleOne(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  const allSelected = sortedOrders.length > 0 && sortedOrders.every((o) => selected.has(o.id))
+  function toggleAll() {
+    setSelected(allSelected ? new Set() : new Set(sortedOrders.map((o) => o.id)))
+  }
+
+  async function handleBulkApply(target: string) {
+    const ids = Array.from(selected)
+    if (ids.length === 0 || !target) return
+    const next = target as Order['status']
+    const before = new Map(orders.map((o) => [o.id, o.status]))
+    setOrders((prev) => prev.map((o) => (selected.has(o.id) ? { ...o, status: next } : o)))
+    try {
+      const result = await bulkUpdateOrderStatus(ids, target)
+
+      const rewrittenStale = new Set(
+        result.results.filter((r) => r.ok && r.rewrittenAsStale).map((r) => r.orderId),
+      )
+      if (rewrittenStale.size > 0) {
+        setOrders((prev) => prev.map((o) =>
+          rewrittenStale.has(o.id) ? { ...o, status: 'RouteOmitted' as Order['status'] } : o,
+        ))
+      }
+
+      const failed = result.results.filter((r) => !r.ok).map((r) => r.orderId)
+      if (failed.length > 0) {
+        setOrders((prev) => prev.map((o) => failed.includes(o.id) && before.has(o.id)
+          ? { ...o, status: before.get(o.id) as Order['status'] }
+          : o))
+        alert(`${failed.length} order${failed.length === 1 ? '' : 's'} could not be updated.`)
+      }
+
+      const summary = summarizeBulkStatusResult(result, target)
+      if (summary) alert(summary)
+
+      setSelected(new Set())
+    } catch {
+      setOrders((prev) => prev.map((o) => before.has(o.id)
+        ? { ...o, status: before.get(o.id) as Order['status'] }
+        : o))
+      alert('Bulk status update failed.')
+    }
+  }
+
+  const statusOptions = ['Ordered', 'Scheduled', 'RouteOptimized', 'RouteOmitted', 'ConfirmationPending', 'Confirmed', 'Rejected', 'OutForDelivery', 'Delivered', 'Archived', 'Cancelled']
 
   return (
     <div className="space-y-3">
@@ -96,6 +161,13 @@ function OrdersTab() {
         <button onClick={load} className="text-sm text-brand-600 hover:underline">Refresh</button>
       </div>
 
+      <BulkStatusBar
+        selectedCount={selected.size}
+        totalCount={sortedOrders.length}
+        onClearSelection={() => setSelected(new Set())}
+        onApply={handleBulkApply}
+      />
+
       {loading ? (
         <div className="flex items-center justify-center h-40 text-gray-400">Loading…</div>
       ) : (
@@ -104,6 +176,15 @@ function OrdersTab() {
             <table className="w-full text-sm">
               <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
                 <tr>
+                  <th className="px-3 py-3 text-left font-medium w-10">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={toggleAll}
+                      className="rounded border-gray-300 text-brand-500 focus:ring-brand-400 cursor-pointer"
+                      title="Select all on this page"
+                    />
+                  </th>
                   <SortHeader label="Store"         sortKey="storeName"            activeKey={sortKey} dir={sortDir} onClick={() => toggle('storeName')} />
                   <SortHeader label="Address"       sortKey="address"              activeKey={sortKey} dir={sortDir} onClick={() => toggle('address')} />
                   <SortHeader label="District/Zone" sortKey="districtZone"         activeKey={sortKey} dir={sortDir} onClick={() => toggle('districtZone')} />
@@ -115,7 +196,15 @@ function OrdersTab() {
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {sortedOrders.map((o) => (
-                  <tr key={o.id} className="hover:bg-gray-50">
+                  <tr key={o.id} className={`hover:bg-gray-50 ${selected.has(o.id) ? 'bg-brand-50/40' : ''}`}>
+                    <td className="px-3 py-3">
+                      <input
+                        type="checkbox"
+                        checked={selected.has(o.id)}
+                        onChange={() => toggleOne(o.id)}
+                        className="rounded border-gray-300 text-brand-500 focus:ring-brand-400 cursor-pointer"
+                      />
+                    </td>
                     <td className="px-4 py-3 font-medium text-gray-900">{o.storeName}</td>
                     <td className="px-4 py-3 text-gray-600">{o.address}, {o.city}</td>
                     <td className="px-4 py-3 text-gray-500">{o.district} / {o.zone}</td>
@@ -141,7 +230,7 @@ function OrdersTab() {
                   </tr>
                 ))}
                 {sortedOrders.length === 0 && (
-                  <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-400">No orders found.</td></tr>
+                  <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-400">No orders found.</td></tr>
                 )}
               </tbody>
             </table>
@@ -197,6 +286,26 @@ function RoutesTab() {
                 <div className="text-xs text-gray-400">{route.id.slice(0, 8)}</div>
               </div>
               <div className="divide-y divide-gray-50">
+                {/* Warehouse pickup is the route's pinned first physical stop —
+                    the driver loads product there before any delivery. */}
+                {route.warehousePickup && (
+                  <div className="px-5 py-3 flex items-center gap-4 bg-amber-50/40">
+                    <span className="w-7 h-7 rounded-md bg-amber-500 text-white text-[10px] font-bold flex items-center justify-center uppercase tracking-wide shrink-0">
+                      W
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold text-amber-700 truncate">
+                        Pickup · {route.warehousePickup.name}
+                      </p>
+                      <p className="text-xs text-gray-500 truncate">{route.warehousePickup.address}</p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className="text-xs font-medium text-gray-700">
+                        {route.warehousePickup.estimatedArrival ? format(new Date(route.warehousePickup.estimatedArrival), 'HH:mm') : '—'}
+                      </p>
+                    </div>
+                  </div>
+                )}
                 {route.stops.map((stop) => (
                   <div key={stop.orderId} className="px-5 py-3 flex items-center gap-4">
                     <span className="w-7 h-7 rounded-full bg-brand-100 text-brand-700 text-xs font-bold flex items-center justify-center shrink-0">
@@ -1045,6 +1154,7 @@ function StatusBadge({ status }: { status: string }) {
     Ordered: 'bg-indigo-100 text-indigo-700',
     Scheduled: 'bg-blue-100 text-blue-700',
     RouteOptimized: 'bg-cyan-100 text-cyan-700',
+    RouteOmitted: 'bg-stone-100 text-stone-600',
     ConfirmationPending: 'bg-yellow-100 text-yellow-700',
     Confirmed: 'bg-green-100 text-green-700',
     Rejected: 'bg-red-100 text-red-700',

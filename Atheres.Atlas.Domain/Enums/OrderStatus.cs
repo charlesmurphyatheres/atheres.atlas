@@ -11,5 +11,13 @@ public enum OrderStatus
     OutForDelivery = 6,
     Delivered = 7,
     Archived = 8,
-    Cancelled = 9
+    Cancelled = 9,
+
+    /// <summary>
+    /// Order was a candidate for routing but is more than a day old. The
+    /// system flips stale rows here instead of dispatching a truck for work
+    /// the warehouse has likely already resolved another way. Terminal —
+    /// rows in this state are not picked up by future optimization runs.
+    /// </summary>
+    RouteOmitted = 10,
 }

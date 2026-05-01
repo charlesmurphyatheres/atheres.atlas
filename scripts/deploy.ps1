@@ -22,6 +22,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# Anchor cwd to the repo root (parent of scripts/) so the relative paths
+# below — `.\.env`, `docker compose` reading `docker-compose.yml`, etc. —
+# all resolve regardless of where the script was invoked from.
+Set-Location (Split-Path -Parent $PSScriptRoot)
+
 # ---- Deployment timer ---------------------------------------
 $deployStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -169,7 +174,7 @@ Write-Header "Building application images"
 
 $buildArg = if ($Build) { "--build" } else { "" }
 
-Invoke-Expression "docker compose build $buildArg --parallel migrations functions auth frontend demo"
+Invoke-Expression "docker compose build $buildArg --parallel migrations functions auth frontend"
 if ($LASTEXITCODE -ne 0) { Write-Err "Build failed."; exit 1 }
 Write-Ok "Images built."
 
@@ -252,7 +257,7 @@ if (Test-Path $importScript) {
 # ---- Start application services -----------------------------
 Write-Header "Starting application services"
 
-docker compose up -d functions auth frontend demo nginx
+docker compose up -d functions auth frontend nginx
 
 # Wait for nginx health
 Write-Info "Waiting for application to be healthy..."
@@ -292,7 +297,6 @@ Write-Header "Atlas Deliver is running"
 
 Write-Host ""
 Write-Host "  Application      " -NoNewline; Write-Host "http://localhost:9708"              -ForegroundColor Green
-Write-Host "  Demo Simulator   " -NoNewline; Write-Host "http://localhost:3001"              -ForegroundColor Green
 Write-Host "  Swagger UI       " -NoNewline; Write-Host "http://localhost:7071/api/swagger"  -ForegroundColor Green
 Write-Host "  Functions API    " -NoNewline; Write-Host "http://localhost:7071/api"          -ForegroundColor Gray
 Write-Host "  Auth Functions   " -NoNewline; Write-Host "http://localhost:7072/api"          -ForegroundColor Gray
@@ -328,7 +332,6 @@ Write-Host ""
 $credFile = Join-Path $PSScriptRoot "CREDENTIALS.txt"
 if (Test-Path $credFile) { Start-Process $credFile }
 Start-Process "http://localhost:9708"
-Start-Process "http://localhost:3001"
 
 if ($Logs) {
     Write-Info "Tailing logs (Ctrl+C to exit)..."

@@ -120,4 +120,129 @@ WHERE (o.Latitude IS NULL OR o.Longitude IS NULL)
             ordersBackfilled,
         });
     }
+
+    /// <summary>
+    /// POST /api/maintenance/geocode-hubs
+    /// Geocodes every Hub missing lat/lng and persists the result. Same
+    /// shape as <see cref="GeocodeStores"/> minus the per-order backfill
+    /// (Orders don't reference Hubs directly).
+    /// </summary>
+    [Function("maintenance-geocode-hubs")]
+    public async Task<IActionResult> GeocodeHubs(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "maintenance/geocode-hubs")]
+        HttpRequest req,
+        CancellationToken ct)
+    {
+        var max = int.TryParse(req.Query["max"], out var m) ? Math.Clamp(m, 1, 5000) : 5000;
+
+        var hubs = await _db.Hubs.IgnoreQueryFilters()
+            .Where(h => h.IsActive && (h.Latitude == null || h.Longitude == null))
+            .OrderBy(h => h.Id)
+            .Take(max)
+            .ToListAsync(ct);
+
+        if (hubs.Count == 0)
+        {
+            return new OkObjectResult(new
+            {
+                message      = "All active hubs already geocoded.",
+                hubsGeocoded = 0,
+                hubsFailed   = 0,
+            });
+        }
+
+        _logger.LogInformation("Geocoding {Count} hubs...", hubs.Count);
+
+        var sem      = new SemaphoreSlim(10);
+        var geocoded = 0;
+        var failed   = 0;
+
+        await Task.WhenAll(hubs.Select(async hub =>
+        {
+            await sem.WaitAsync(ct);
+            try
+            {
+                var result = await _maps.GeocodeAsync(hub.FullAddress, ct);
+                if (result is null) { Interlocked.Increment(ref failed); return; }
+                hub.Latitude         = result.Latitude;
+                hub.Longitude        = result.Longitude;
+                hub.FormattedAddress = result.FormattedAddress;
+                hub.UpdatedAt        = DateTime.UtcNow;
+                Interlocked.Increment(ref geocoded);
+            }
+            finally { sem.Release(); }
+        }));
+
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("Hub geocoding complete: {Ok} geocoded, {Fail} failed", geocoded, failed);
+        return new OkObjectResult(new
+        {
+            message      = "Hub geocoding complete.",
+            hubsGeocoded = geocoded,
+            hubsFailed   = failed,
+        });
+    }
+
+    /// <summary>
+    /// POST /api/maintenance/geocode-warehouses
+    /// Geocodes every Warehouse missing lat/lng and persists the result.
+    /// Mirror of <see cref="GeocodeHubs"/>.
+    /// </summary>
+    [Function("maintenance-geocode-warehouses")]
+    public async Task<IActionResult> GeocodeWarehouses(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "maintenance/geocode-warehouses")]
+        HttpRequest req,
+        CancellationToken ct)
+    {
+        var max = int.TryParse(req.Query["max"], out var m) ? Math.Clamp(m, 1, 5000) : 5000;
+
+        var warehouses = await _db.Warehouses.IgnoreQueryFilters()
+            .Where(w => w.IsActive && (w.Latitude == null || w.Longitude == null))
+            .OrderBy(w => w.Id)
+            .Take(max)
+            .ToListAsync(ct);
+
+        if (warehouses.Count == 0)
+        {
+            return new OkObjectResult(new
+            {
+                message            = "All active warehouses already geocoded.",
+                warehousesGeocoded = 0,
+                warehousesFailed   = 0,
+            });
+        }
+
+        _logger.LogInformation("Geocoding {Count} warehouses...", warehouses.Count);
+
+        var sem      = new SemaphoreSlim(10);
+        var geocoded = 0;
+        var failed   = 0;
+
+        await Task.WhenAll(warehouses.Select(async wh =>
+        {
+            await sem.WaitAsync(ct);
+            try
+            {
+                var result = await _maps.GeocodeAsync(wh.FullAddress, ct);
+                if (result is null) { Interlocked.Increment(ref failed); return; }
+                wh.Latitude         = result.Latitude;
+                wh.Longitude        = result.Longitude;
+                wh.FormattedAddress = result.FormattedAddress;
+                wh.UpdatedAt        = DateTime.UtcNow;
+                Interlocked.Increment(ref geocoded);
+            }
+            finally { sem.Release(); }
+        }));
+
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("Warehouse geocoding complete: {Ok} geocoded, {Fail} failed", geocoded, failed);
+        return new OkObjectResult(new
+        {
+            message            = "Warehouse geocoding complete.",
+            warehousesGeocoded = geocoded,
+            warehousesFailed   = failed,
+        });
+    }
 }

@@ -13,11 +13,13 @@ public class RouteRepository : IRouteRepository
         await _db.Routes
             .Include(r => r.Stops).ThenInclude(s => s.Order)
             .Include(r => r.Orders)
+            .Include(r => r.Warehouse)
             .FirstOrDefaultAsync(r => r.Id == id, ct);
 
     public async Task<IReadOnlyList<DeliveryRoute>> GetByDateAsync(DateTime date, CancellationToken ct = default) =>
         await _db.Routes
             .Include(r => r.Stops).ThenInclude(s => s.Order)
+            .Include(r => r.Warehouse)
             .Where(r => r.DeliveryDate.Date == date.Date)
             .ToListAsync(ct);
 
