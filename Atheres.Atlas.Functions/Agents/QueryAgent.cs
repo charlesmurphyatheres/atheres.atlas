@@ -257,7 +257,6 @@ public class QueryAgent
     // GET /api/stores
     // -----------------------------------------------------------------------
     [Function("query-stores-list")]
-    [AllowAnonymous]
     public async Task<IActionResult> ListStores(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "stores")]
         HttpRequest req, CancellationToken ct)
@@ -330,15 +329,15 @@ public class QueryAgent
 
     // -----------------------------------------------------------------------
     // POST /api/orders/mark-all-ready
-    // Called by the order simulator. Marking orders as ready-to-pickup is also
-    // the trigger that kicks off routing — publishes optimization messages
-    // inline so there's no separate "run optimization" step.
+    // Marks every Ordered row for the company (optionally a single delivery
+    // date) as ready-to-pickup, which is also the trigger that kicks off
+    // routing — publishes optimization messages inline so there's no separate
+    // "run optimization" step.
     //
     // Body: { "companySlug": "<slug-or-guid>", "deliveryDate"?: "yyyy-MM-dd" }
-    // Anonymous on purpose: the demo app runs without auth.
     // -----------------------------------------------------------------------
     [Function("orders-mark-all-ready")]
-    [AllowAnonymous]
+    [Authorize(Roles = "Admin,SuperAdmin,Logistics")]
     public async Task<IActionResult> MarkAllReady(
         [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "orders/mark-all-ready")]
         HttpRequest req,

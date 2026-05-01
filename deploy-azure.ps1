@@ -337,9 +337,6 @@ $SendGridApiKey      = Get-RequiredEnv "SENDGRID_API_KEY"    "SendGrid account A
 $SendGridFromEmail   = "noreply@atlasdeliver.com"
 $SendGridFromName    = "Atlas Deliver"
 
-# Demo app
-$DemoStorage         = "statlasdemo0001"
-
 # JWT -- persist the signing key in .env so redeploys don't invalidate every
 # issued token. First run generates a cryptographically secure 256-bit key.
 if ([string]::IsNullOrWhiteSpace($_envVars["JWT_SECRET_KEY"])) {
@@ -752,37 +749,7 @@ $FrontendOrigin = (az storage account show `
     --query "primaryEndpoints.web" -o tsv).TrimEnd('/')
 
 # =============================================================
-# 12. DEMO APP STORAGE (Static Website)
-# =============================================================
-
-Write-Host "`n=== Demo App Storage: $DemoStorage ===" -ForegroundColor Cyan
-Invoke-EnsureResource -Label "Demo storage $DemoStorage" `
-    -ShowArgs @('storage','account','show','--resource-group',$ResourceGroup,'--name',$DemoStorage) `
-    -CreateBlock {
-        az storage account create `
-            --resource-group $ResourceGroup `
-            --name $DemoStorage `
-            --location $Location `
-            --sku Standard_LRS `
-            --kind StorageV2 `
-            --min-tls-version TLS1_2 `
-            --output none
-    }
-
-az storage blob service-properties update `
-    --account-name $DemoStorage `
-    --static-website `
-    --index-document "index.html" `
-    --404-document "index.html" `
-    --output none
-
-$DemoOrigin = (az storage account show `
-    --resource-group $ResourceGroup `
-    --name $DemoStorage `
-    --query "primaryEndpoints.web" -o tsv).TrimEnd('/')
-
-# =============================================================
-# 13. AZURE FRONT DOOR (SSL + Custom Domain + Routing)
+# 12. AZURE FRONT DOOR (SSL + Custom Domain + Routing)
 # =============================================================
 
 Write-Host "`n=== Front Door: $FrontDoorName ===" -ForegroundColor Cyan
@@ -819,12 +786,10 @@ $FrontDoorHostname = (az afd endpoint show `
 # ----- Origin Groups + Origins -----
 
 $FrontendHost = ($FrontendOrigin -replace "https://", "")
-$DemoHost     = ($DemoOrigin     -replace "https://", "")
 
 # Declarative definition -- every origin group uses the same probe config.
 $originGroups = @(
     @{ Name = "og-frontend";       Host = $FrontendHost;                       OriginName = "origin-frontend" },
-    @{ Name = "og-demo";           Host = $DemoHost;                           OriginName = "origin-demo" },
     @{ Name = "og-functions-main"; Host = "$FuncAppMain.azurewebsites.net";    OriginName = "origin-func-main" },
     @{ Name = "og-functions-auth"; Host = "$FuncAppAuth.azurewebsites.net";    OriginName = "origin-func-auth" }
 )
@@ -891,7 +856,6 @@ $routeDefs = @(
     @{ Name="route-warehouses";  Group="og-functions-auth"; Patterns=@("/api/warehouses/*") },
     @{ Name="route-hubs";        Group="og-functions-auth"; Patterns=@("/api/hubs/*") },
     @{ Name="route-api";         Group="og-functions-main"; Patterns=@("/api/*") },
-    @{ Name="route-demo";        Group="og-demo";           Patterns=@("/demo/*") },
     @{ Name="route-frontend";    Group="og-frontend";       Patterns=@("/*") }
 )
 
@@ -1111,18 +1075,12 @@ finally {
 }
 
 # =============================================================
-# 14. DEPLOY CODE (Functions + Frontends)
+# 13. DEPLOY CODE (Functions + Frontends)
 # =============================================================
 # Auth Functions must be published + warm BEFORE any reference-data import,
 # because its startup seed creates the Companies rows that every imported
 # hub/warehouse/store/truck FKs into.
 # =============================================================
-
-# The Demo app lives on its own storage origin, so both Function Apps must
-# allow it in addition to the Front Door / custom domain.
-Write-Host "`n=== Extending CORS to the Demo origin ===" -ForegroundColor Cyan
-Add-FunctionAppCorsOrigin -AppName $FuncAppMain -Origin $DemoOrigin
-Add-FunctionAppCorsOrigin -AppName $FuncAppAuth -Origin $DemoOrigin
 
 Write-Host "`n=== Publishing Auth Functions ===" -ForegroundColor Cyan
 Push-Location (Join-Path $ProjectRoot "Atheres.Atlas.Auth.Functions")
@@ -1212,30 +1170,8 @@ finally {
     Pop-Location
 }
 
-# Build + upload the Demo app. It's served from its own storage origin, so it
-# calls the API by absolute URL -- point it at the custom domain Front Door.
-Write-Host "`n=== Building + uploading Demo app ===" -ForegroundColor Cyan
-$demoDir = Join-Path $ProjectRoot "Atheres.Atlas.Demo"
-Push-Location $demoDir
-try {
-    if (-not (Test-Path "node_modules")) { npm ci; if ($LASTEXITCODE -ne 0) { throw "npm ci (demo) failed." } }
-    $env:VITE_API_BASE_URL = $PublicUrl
-    npm run build
-    if ($LASTEXITCODE -ne 0) { throw "Demo build failed." }
-    # Upload into $web/demo/ (not the container root) so the bundle's
-    # /demo/assets/... references -- produced by vite.config.ts base: '/demo/'
-    # -- map to actual blobs. AFD route-demo (/demo/*) forwards the path
-    # unchanged, so www.atlasdeliver.com/demo/ hits storage's /demo/index.html.
-    az storage blob upload-batch --source dist --destination '$web' --destination-path 'demo' --account-name $DemoStorage --overwrite --output none
-    Assert-AzSuccess "Demo blob upload"
-}
-finally {
-    Remove-Item Env:\VITE_API_BASE_URL -ErrorAction SilentlyContinue
-    Pop-Location
-}
-
 # =============================================================
-# 15. SUMMARY
+# 14. SUMMARY
 # =============================================================
 
 $deployStopwatch.Stop()
@@ -1248,11 +1184,6 @@ try {
 } catch {
     $mainAppUrl = "https://$FrontDoorHostname"
 }
-# Demo is now uploaded to $web/demo/ (see upload step above), so the raw
-# storage URL also needs the /demo/ suffix. Front Door path is still /demo/
-# on the custom domain (AFD route-demo forwards /demo/* unchanged).
-$demoAppUrl = if ($mainAppUrl -eq $PublicUrl) { "$PublicUrl/demo/" } else { "$DemoOrigin/demo/" }
-
 # ---- Append the Azure URLs + users to CREDENTIALS.txt --------
 $credsFile = Join-Path $ProjectRoot "CREDENTIALS.txt"
 $bootstrapLine = if ([string]::IsNullOrWhiteSpace($SeedAdminPassword)) {
@@ -1270,7 +1201,6 @@ $azureBlock = @"
 ================================================================================
 
   Main Application:  $mainAppUrl
-  Demo Simulator:    $demoAppUrl
   Swagger UI:        https://$FuncAppMain.azurewebsites.net/api/swagger
 
 --------------------------------------------------------------------------------
@@ -1283,8 +1213,6 @@ $bootstrapLine
   SuperAdmin      ken@atheres.com                Phone@3313059708       (all companies)
   Admin           secure@gmail.com               Secure@1234567890      Secure Transport
   Driver          secureuser@gmail.com           Secure@1234567890      Secure Transport
-  Admin           demo@atheres.com               Phone@3464978286       Demo Company
-  Driver          demouser@atheres.com           Phone@3464978286       Demo Company
 
 --------------------------------------------------------------------------------
   API ENDPOINTS
@@ -1334,7 +1262,6 @@ Write-Host (Format-Duration $deployStopwatch) -ForegroundColor Cyan
 Write-Host "=============================================================" -ForegroundColor Green
 
 Write-Host "`nMain Application:    $mainAppUrl"
-Write-Host "Demo Simulator:      $demoAppUrl"
 Write-Host "Swagger:             https://$FuncAppMain.azurewebsites.net/api/swagger"
 Write-Host "Function App (Main): $FuncAppMain.azurewebsites.net"
 Write-Host "Function App (Auth): $FuncAppAuth.azurewebsites.net"
@@ -1347,7 +1274,6 @@ if ($mainAppUrl -ne $PublicUrl) {
 Write-Host "`nFollow-up task after the first successful deploy:" -ForegroundColor Gray
 Write-Host "  az functionapp config appsettings set -g $ResourceGroup -n $FuncAppAuth --settings SeedAdminPassword=" -ForegroundColor Gray
 
-# ---- Open both apps in the default browser -------------------
-Write-Host "`nOpening applications in browser..." -ForegroundColor Cyan
+# ---- Open the app in the default browser ---------------------
+Write-Host "`nOpening application in browser..." -ForegroundColor Cyan
 Start-Process $mainAppUrl
-Start-Process $demoAppUrl

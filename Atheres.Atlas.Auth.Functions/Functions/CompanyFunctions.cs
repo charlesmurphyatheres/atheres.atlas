@@ -44,7 +44,7 @@ public class CompanyFunctions
     // GET /api/companies  (SuperAdmin)
     // -----------------------------------------------------------------------
     [Function("companies-list")]
-    [AllowAnonymous]
+    [Authorize(Roles = "SuperAdmin")]
     public async Task<IActionResult> List(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "companies")]
         HttpRequest req, CancellationToken ct)

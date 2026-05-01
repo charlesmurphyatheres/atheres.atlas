@@ -1,5 +1,6 @@
 using System.Net;
 using System.Reflection;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 
@@ -9,7 +10,13 @@ namespace Atheres.Atlas.Functions.Agents;
 /// Serves the OpenAPI spec and Swagger UI for the Atlas API.
 /// GET /api/swagger.json — OpenAPI 3.0 spec
 /// GET /api/swagger     — Swagger UI
+///
+/// Both endpoints require an authenticated caller. The Swagger UI page
+/// itself can't authenticate the browser tab automatically — open it with a
+/// bearer token (e.g. via a browser extension that adds the header) or call
+/// /api/swagger.json directly with `curl -H "Authorization: Bearer …"`.
 /// </summary>
+[Authorize(Roles = "Admin,SuperAdmin")]
 public class SwaggerAgent
 {
     [Function("swagger-spec")]
@@ -17,6 +24,8 @@ public class SwaggerAgent
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "swagger.json")] HttpRequestData req,
         CancellationToken ct)
     {
+        if (RequireAuthenticatedAdmin(req) is { } unauth) return unauth;
+
         var assembly = Assembly.GetExecutingAssembly();
         var resourceName = "Atheres.Atlas.Functions.swagger.json";
 
@@ -53,6 +62,8 @@ public class SwaggerAgent
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "swagger")] HttpRequestData req,
         CancellationToken ct)
     {
+        if (RequireAuthenticatedAdmin(req) is { } unauth) return unauth;
+
         var html = """
         <!DOCTYPE html>
         <html lang="en">
@@ -85,5 +96,22 @@ public class SwaggerAgent
         response.Headers.Add("Content-Type", "text/html");
         await response.WriteStringAsync(html, ct);
         return response;
+    }
+
+    /// <summary>
+    /// Returns an Unauthorized response when the caller isn't an authenticated
+    /// Admin / SuperAdmin. [Authorize] doesn't always fire on HttpRequestData
+    /// triggers in the isolated worker, so we check the JWT-populated
+    /// principal explicitly.
+    /// </summary>
+    private static HttpResponseData? RequireAuthenticatedAdmin(HttpRequestData req)
+    {
+        var http = req.FunctionContext.GetHttpContext();
+        var user = http?.User;
+        if (user?.Identity?.IsAuthenticated != true)
+            return req.CreateResponse(HttpStatusCode.Unauthorized);
+        if (!user.IsInRole("Admin") && !user.IsInRole("SuperAdmin"))
+            return req.CreateResponse(HttpStatusCode.Forbidden);
+        return null;
     }
 }

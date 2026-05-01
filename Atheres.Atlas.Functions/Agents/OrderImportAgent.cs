@@ -67,6 +67,26 @@ public class OrderImportAgent
         if (company is null)
             return new BadRequestObjectResult(new { error = "Company not found." });
 
+        // OrderImporter accounts are pinned to a single warehouse via the
+        // "warehouseId" JWT claim. We require that claim and validate it
+        // against the caller's company so a tampered token can't drop
+        // orders into a warehouse that doesn't belong to them.
+        var isOrderImporter = req.HttpContext.User.IsInRole(Roles.OrderImporter);
+        Guid? defaultWarehouseId = null;
+        if (isOrderImporter)
+        {
+            var claim = req.HttpContext.User.FindFirst("warehouseId")?.Value;
+            if (!Guid.TryParse(claim, out var warehouseId))
+                return new BadRequestObjectResult(new { error = "Order Importer account is missing a warehouse assignment." });
+
+            var warehouseExists = await _db.Warehouses.IgnoreQueryFilters()
+                .AnyAsync(w => w.Id == warehouseId && w.CompanyId == company.Id && w.IsActive, ct);
+            if (!warehouseExists)
+                return new BadRequestObjectResult(new { error = "Assigned warehouse not found or inactive." });
+
+            defaultWarehouseId = warehouseId;
+        }
+
         // Pre-load every store the import could possibly reference so we
         // don't issue one query per row. The frontend sends StoreId for
         // each row (it has already resolved them via the preview grid),
@@ -117,6 +137,7 @@ public class OrderImportAgent
             var order = new Order
             {
                 CompanyId           = company.Id,
+                WarehouseId         = defaultWarehouseId,
                 StoreId             = matchedStore.Id,
                 StoreLicenseNumber  = matchedStore.LicenseNumber,
                 StoreName           = matchedStore.Name,

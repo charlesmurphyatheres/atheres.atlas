@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { getUsers, registerUser, deactivateUser, getOrders, updateOrderStatus, getRoutes, getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse, getHubs, createHub, updateHub, deleteHub, getTrucks, createTruck, updateTruck, deleteTruck } from '../../services/apiService'
 import { TRUCK_STATUSES, type TruckStatus } from '../../types'
 import { useSortedRows } from '../../hooks/useSortedRows'
@@ -228,10 +228,15 @@ function RoutesTab() {
 function UsersTab() {
   const { isRole } = useAuth()
   const [users, setUsers] = useState<AppUser[]>([])
+  const [warehouses, setWarehouses] = useState<Warehouse[]>([])
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
-  const [form, setForm] = useState({ email: '', password: '', firstName: '', lastName: '', role: 'Driver' as Role })
+  const [form, setForm] = useState({
+    email: '', password: '', firstName: '', lastName: '',
+    role: 'Driver' as Role, warehouseId: '',
+  })
   const [formError, setFormError] = useState('')
+  const [formNotice, setFormNotice] = useState('')
   const [creating, setCreating] = useState(false)
   const { sorted: sortedUsers, sortKey, sortDir, toggle } = useSortedRows(users, {
     accessors: {
@@ -240,22 +245,54 @@ function UsersTab() {
     },
   })
 
+  // Importer accounts are pinned to a single warehouse; the dropdown
+  // appears only when the role demands it. Pre-load warehouses once so
+  // it's instant when the admin flips the role.
+  const isImporterRole = form.role === 'OrderImporter'
+  const warehousesById = useMemo(
+    () => new Map(warehouses.map((w) => [w.id, w])),
+    [warehouses],
+  )
+
   useEffect(() => {
-    getUsers().then(setUsers).finally(() => setLoading(false))
+    Promise.all([getUsers(), getWarehouses()])
+      .then(([u, w]) => { setUsers(u); setWarehouses(w) })
+      .finally(() => setLoading(false))
   }, [])
 
   async function handleCreate() {
     setFormError('')
-    if (!form.email || !form.password) { setFormError('Email and password are required.'); return }
+    setFormNotice('')
+    if (!form.email) { setFormError('Email is required.'); return }
+    if (!isImporterRole && !form.password) { setFormError('Password is required.'); return }
+    if (isImporterRole && !form.warehouseId) { setFormError('Select a warehouse for this Order Importer.'); return }
     setCreating(true)
     try {
-      await registerUser(form)
+      const payload = {
+        email:       form.email,
+        // Importer accounts ignore this field on the backend — a temp
+        // password is generated and emailed. Pass an empty string so the
+        // axios layer doesn't strip the property and confuse callers.
+        password:    isImporterRole ? '' : form.password,
+        firstName:   form.firstName,
+        lastName:    form.lastName,
+        role:        form.role,
+        warehouseId: isImporterRole ? form.warehouseId : undefined,
+      }
+      const res = await registerUser(payload)
       const updated = await getUsers()
       setUsers(updated)
-      setShowCreate(false)
-      setForm({ email: '', password: '', firstName: '', lastName: '', role: 'Driver' })
-    } catch {
-      setFormError('Failed to create user.')
+      if (isImporterRole) {
+        setFormNotice(res.invitationEmailed
+          ? 'User created. An invitation email with a temporary password has been sent.'
+          : 'User created, but the invitation email failed to send. Resend manually.')
+      } else {
+        setShowCreate(false)
+      }
+      setForm({ email: '', password: '', firstName: '', lastName: '', role: 'Driver', warehouseId: '' })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to create user.'
+      setFormError(msg)
     } finally {
       setCreating(false)
     }
@@ -306,9 +343,17 @@ function UsersTab() {
                 className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400" />
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Password *</label>
-              <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })}
-                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400" />
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                {isImporterRole ? 'Password' : 'Password *'}
+              </label>
+              <input
+                type="password"
+                value={form.password}
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+                disabled={isImporterRole}
+                placeholder={isImporterRole ? 'Generated and emailed to user' : ''}
+                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400 disabled:bg-gray-50 disabled:text-gray-400"
+              />
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Role</label>
@@ -321,8 +366,29 @@ function UsersTab() {
                 ))}
               </select>
             </div>
+            {isImporterRole && (
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Warehouse *</label>
+                <select
+                  value={form.warehouseId}
+                  onChange={(e) => setForm({ ...form, warehouseId: e.target.value })}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400"
+                >
+                  <option value="">— Select a warehouse —</option>
+                  {warehouses.map((w) => (
+                    <option key={w.id} value={w.id}>{w.businessName}</option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-gray-400 mt-1">
+                  Importer is permanently scoped to this warehouse. They'll receive an invitation email with a temporary password and must change it on first sign-in.
+                </p>
+              </div>
+            )}
           </div>
           {formError && <p className="text-sm text-red-600">{formError}</p>}
+          {formNotice && (
+            <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2">{formNotice}</p>
+          )}
           <div className="flex gap-2">
             <button onClick={handleCreate} disabled={creating}
               className="px-4 py-2 bg-brand-500 text-white text-sm font-medium rounded-lg hover:bg-brand-600 disabled:opacity-50">
@@ -344,6 +410,7 @@ function UsersTab() {
                 <SortHeader label="Name"       sortKey="fullName"    activeKey={sortKey} dir={sortDir} onClick={() => toggle('fullName')} />
                 <SortHeader label="Email"      sortKey="email"       activeKey={sortKey} dir={sortDir} onClick={() => toggle('email')} />
                 <SortHeader label="Roles"      sortKey="roles"       activeKey={sortKey} dir={sortDir} onClick={() => toggle('roles')} />
+                <th className="px-4 py-3 text-left font-medium">Warehouse</th>
                 <SortHeader label="Last Login" sortKey="lastLoginAt" activeKey={sortKey} dir={sortDir} onClick={() => toggle('lastLoginAt')} />
                 <SortHeader label="Status"     sortKey="isActive"    activeKey={sortKey} dir={sortDir} onClick={() => toggle('isActive')} />
                 <th className="px-4 py-3 text-left font-medium"></th>
@@ -360,6 +427,11 @@ function UsersTab() {
                         <span key={r} className={`px-2 py-0.5 rounded-full text-xs font-medium ${roleColors[r] ?? 'bg-gray-100 text-gray-600'}`}>{r}</span>
                       ))}
                     </div>
+                  </td>
+                  <td className="px-4 py-3 text-gray-500 text-xs">
+                    {u.assignedWarehouseId
+                      ? (warehousesById.get(u.assignedWarehouseId)?.businessName ?? '—')
+                      : '—'}
                   </td>
                   <td className="px-4 py-3 text-gray-500">
                     {u.lastLoginAt ? format(new Date(u.lastLoginAt), 'MMM dd HH:mm') : '—'}
@@ -378,7 +450,7 @@ function UsersTab() {
                 </tr>
               ))}
               {sortedUsers.length === 0 && (
-                <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-400">No users found.</td></tr>
+                <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-400">No users found.</td></tr>
               )}
             </tbody>
           </table>

@@ -51,9 +51,14 @@ export async function registerUser(payload: {
   lastName?: string
   role?: string
   companyId?: string
-}): Promise<{ userId: string }> {
-  const { data } = await api.post<{ userId: string }>('/auth/register', payload)
+  warehouseId?: string
+}): Promise<{ userId: string; invitationEmailed?: boolean }> {
+  const { data } = await api.post<{ userId: string; invitationEmailed?: boolean }>('/auth/register', payload)
   return data
+}
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  await api.post('/auth/change-password', { currentPassword, newPassword })
 }
 
 // ---- Orders ----

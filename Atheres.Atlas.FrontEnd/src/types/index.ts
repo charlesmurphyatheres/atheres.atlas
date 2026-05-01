@@ -137,6 +137,9 @@ export interface AuthUser {
   companyId?: string
   companyName?: string
   companySlug?: string
+  warehouseId?: string
+  warehouseName?: string
+  mustChangePassword?: boolean
 }
 
 export interface TokenResponse {
@@ -150,6 +153,9 @@ export interface TokenResponse {
   companyId?: string
   companyName?: string
   companySlug?: string
+  warehouseId?: string
+  warehouseName?: string
+  mustChangePassword?: boolean
 }
 
 // ---- Company / Truck ----
@@ -268,6 +274,8 @@ export interface AppUser {
   roles: Role[]
   companyId?: string
   assignedTruckId?: string
+  assignedWarehouseId?: string
+  mustChangePassword?: boolean
   isActive: boolean
   lastLoginAt?: string
 }

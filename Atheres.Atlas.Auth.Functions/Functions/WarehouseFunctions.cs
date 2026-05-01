@@ -33,7 +33,7 @@ public class WarehouseFunctions
     // GET /api/warehouses  (Admin, SuperAdmin)
     // -----------------------------------------------------------------------
     [Function("warehouses-list")]
-    [AllowAnonymous]
+    [Authorize(Roles = "Admin,SuperAdmin")]
     public async Task<IActionResult> List(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "warehouses")]
         HttpRequest req, CancellationToken ct)

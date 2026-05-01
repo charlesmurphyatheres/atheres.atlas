@@ -6,7 +6,6 @@
 #   * Auth Functions  (func-atlas-auth)
 #   * Main Functions  (func-atlas-main)
 #   * Frontend SPA    -> statlasfe0001 static website
-#   * Demo SPA        -> statlasdemo0001 static website
 #   * EF migrations   (opt-in: -Migrations)
 #
 # After publishing it restarts the Function Apps, waits for them to reindex,
@@ -15,7 +14,7 @@
 # Usage:
 #   .\upgrade-azure.ps1                           # everything except migrations
 #   .\upgrade-azure.ps1 -Backend                  # only Function Apps
-#   .\upgrade-azure.ps1 -Frontend -Demo           # only the two SPAs
+#   .\upgrade-azure.ps1 -Frontend                 # only the SPA
 #   .\upgrade-azure.ps1 -Auth                     # only Auth Functions
 #   .\upgrade-azure.ps1 -Main                     # only Main Functions
 #   .\upgrade-azure.ps1 -Migrations               # everything + EF migrate
@@ -27,7 +26,6 @@ param(
     [switch]$Auth,        # publish Auth Functions only
     [switch]$Main,        # publish Main Functions only
     [switch]$Frontend,    # build + upload main SPA only
-    [switch]$Demo,        # build + upload demo SPA only
     [switch]$Migrations,  # run `dotnet ef database update` for both contexts
     [switch]$SkipPurge    # don't call `az afd endpoint purge` after uploading SPAs
 )
@@ -44,7 +42,6 @@ $ResourceGroup       = "rg-atheres-atlas"
 $FuncAppMain         = "func-atlas-main"
 $FuncAppAuth         = "func-atlas-auth"
 $FrontendStorage     = "statlasfe0001"
-$DemoStorage         = "statlasdemo0001"
 $FrontDoorName       = "fd-atheres-atlas"
 $FrontDoorProfile    = "fdp-atheres-atlas"
 $PublicUrl           = "https://www.atlasdeliver.com"
@@ -69,10 +66,10 @@ function Get-RequiredEnv {
 }
 
 # ---- Resolve target set ------------------------------------------------------
-# If no flag is passed, "everything" means both Function Apps + both SPAs.
+# If no flag is passed, "everything" means both Function Apps + the SPA.
 # Migrations are opt-in because they can be destructive on a shared DB.
-$noFlags = -not ($Backend -or $Auth -or $Main -or $Frontend -or $Demo -or $Migrations)
-if ($noFlags) { $Backend = $true; $Frontend = $true; $Demo = $true }
+$noFlags = -not ($Backend -or $Auth -or $Main -or $Frontend -or $Migrations)
+if ($noFlags) { $Backend = $true; $Frontend = $true }
 if ($Backend) { $Auth = $true; $Main = $true }
 
 # ---- Helpers -----------------------------------------------------------------
@@ -236,51 +233,15 @@ if ($Frontend) {
     }
 }
 
-if ($Demo) {
-    Write-Host "`n=== Building + uploading Demo app ===" -ForegroundColor Cyan
-    $demoDir = Join-Path $ProjectRoot "Atheres.Atlas.Demo"
-    if (-not (Test-Path $demoDir)) { throw "Demo directory not found: $demoDir" }
-    Push-Location $demoDir
-    try {
-        if (-not (Test-Path "node_modules")) {
-            npm ci
-            if ($LASTEXITCODE -ne 0) { throw "npm ci (demo) failed." }
-        }
-        $env:VITE_API_BASE_URL = $PublicUrl    # demo lives on its own origin, absolute API URL
-        npm run build
-        if ($LASTEXITCODE -ne 0) { throw "Demo build failed." }
-        # Upload into $web/demo/ (not $web/root) so the bundle's /demo/assets/...
-        # references -- produced by vite.config.ts setting base: '/demo/' -- map
-        # to actual blobs in storage. AFD route-demo has pattern /demo/* and
-        # forwards the path unchanged, so www.atlasdeliver.com/demo/ hits
-        # storage's /demo/index.html. The direct storage URL is then
-        # statlasdemo0001.z19.web.core.windows.net/demo/ .
-        az storage blob upload-batch `
-            --source dist `
-            --destination '$web' `
-            --destination-path 'demo' `
-            --account-name $DemoStorage `
-            --overwrite `
-            --output none
-        Assert-AzSuccess "Demo blob upload"
-    }
-    finally {
-        Remove-Item Env:\VITE_API_BASE_URL -ErrorAction SilentlyContinue
-        Pop-Location
-    }
-}
-
 # =============================================================
 # 4. PURGE FRONT DOOR CACHE
 # =============================================================
 # Without a purge, the edge can serve the previous bundle for up to the
 # static-website cache TTL. A purge is cheap and avoids user-visible staleness.
 
-if (-not $SkipPurge -and ($Frontend -or $Demo)) {
+if (-not $SkipPurge -and $Frontend) {
     Write-Host "`n=== Purging Front Door cache ===" -ForegroundColor Cyan
-    $paths = @()
-    if ($Frontend) { $paths += "/*" }
-    if ($Demo)     { $paths += "/demo/*" }
+    $paths = @("/*")
     az afd endpoint purge `
         --resource-group $ResourceGroup `
         --profile-name $FrontDoorProfile `
@@ -308,9 +269,7 @@ if ($Auth)       { Write-Host "    - Auth Functions      -> $FuncAppAuth" }
 if ($Main)       { Write-Host "    - Main Functions      -> $FuncAppMain" }
 if ($Migrations) { Write-Host "    - EF Migrations       -> both contexts" }
 if ($Frontend)   { Write-Host "    - Frontend SPA        -> $FrontendStorage" }
-if ($Demo)       { Write-Host "    - Demo SPA            -> $DemoStorage" }
 Write-Host ""
-Write-Host "  URLs:"
+Write-Host "  URL:"
 Write-Host "    Main:  $PublicUrl"
-Write-Host "    Demo:  $PublicUrl/demo/"
 Write-Host ""

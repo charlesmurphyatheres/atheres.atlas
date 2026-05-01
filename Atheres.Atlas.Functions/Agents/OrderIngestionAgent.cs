@@ -42,22 +42,26 @@ public class OrderIngestionAgent
     }
 
     /// <summary>
-    /// Public endpoint: accepts a JSON array of orders identified by license numbers.
-    /// POST /api/orders
+    /// Authenticated endpoint: accepts a JSON order identified by license
+    /// numbers. POST /api/orders
     ///
-    /// AuthorizationLevel.Anonymous because the demo simulator (served from a
-    /// different origin, with no auth token plumbed in) posts to this endpoint.
-    /// The request body carries CompanySlug explicitly, so there's no need for
-    /// a caller identity at the Functions-host layer. If we later want to gate
-    /// this behind a JWT, add a Bearer-token check inside the handler rather
-    /// than switching back to Function-level auth (which would require shipping
-    /// a function key to a public-facing SPA).
+    /// AuthorizationLevel.Anonymous on the trigger so no Functions function
+    /// key is required, but the caller must present a valid JWT. The CSV
+    /// import flow remains the primary in-app way to create orders; this
+    /// endpoint is for upstream warehouse-system integrations that hold a
+    /// service JWT.
     /// </summary>
     [Function(nameof(IngestOrders))]
     public async Task<HttpResponseData> IngestOrders(
         [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "orders")] HttpRequestData req,
         CancellationToken ct)
     {
+        // [Authorize] doesn't always fire on HttpRequestData triggers in the
+        // isolated worker — check the JWT-populated principal explicitly.
+        var httpContext = req.FunctionContext.GetHttpContext();
+        if (httpContext?.User?.Identity?.IsAuthenticated != true)
+            return req.CreateResponse(HttpStatusCode.Unauthorized);
+
         OrderInputDto? dto;
         try
         {
@@ -112,13 +116,6 @@ public class OrderIngestionAgent
             return notFound;
         }
 
-        if (dto.Items.Count == 0)
-        {
-            var noItems = req.CreateResponse(HttpStatusCode.BadRequest);
-            await noItems.WriteAsJsonAsync(new { error = "Order must have at least one item." }, ct);
-            return noItems;
-        }
-
         // Self-heal: if this store has never been geocoded, do it once and persist
         // to the Store row. Stops orders from being silently unroutable when
         // imports skip lat/lng.
@@ -138,12 +135,6 @@ public class OrderIngestionAgent
                     store.Name, store.LicenseNumber);
             }
         }
-
-        // Upsert products
-        var skus = dto.Items.Select(i => i.Sku).Distinct().ToList();
-        var existingProducts = await _db.Products
-            .Where(p => skus.Contains(p.Sku))
-            .ToDictionaryAsync(p => p.Sku, ct);
 
         var order = new Order
         {
@@ -167,37 +158,12 @@ public class OrderIngestionAgent
             Longitude              = store.Longitude,
             FormattedAddress       = store.FormattedAddress,
             OrderDate              = dto.OrderDate,
+            Customer               = string.IsNullOrWhiteSpace(dto.Customer) ? null : dto.Customer.Trim(),
+            SalesOrderNumber       = string.IsNullOrWhiteSpace(dto.SalesOrderNumber) ? null : dto.SalesOrderNumber.Trim(),
+            PurchaseOrderNumber    = string.IsNullOrWhiteSpace(dto.PurchaseOrderNumber) ? null : dto.PurchaseOrderNumber.Trim(),
             Notes                  = dto.Notes,
             Status                 = OrderStatus.Ordered,
         };
-
-        foreach (var itemDto in dto.Items)
-        {
-            if (!existingProducts.TryGetValue(itemDto.Sku, out var product))
-            {
-                product = new Product
-                {
-                    Sku      = itemDto.Sku,
-                    Name     = itemDto.Name,
-                    Category = itemDto.Category,
-                };
-                _db.Products.Add(product);
-                existingProducts[itemDto.Sku] = product;
-            }
-            else if (product.Name != itemDto.Name)
-            {
-                product.Name = itemDto.Name;
-                product.UpdatedAt = DateTime.UtcNow;
-            }
-
-            order.Items.Add(new OrderItem
-            {
-                ProductId = product.Id,
-                Sku       = itemDto.Sku,
-                Name      = itemDto.Name,
-                Quantity  = itemDto.Quantity,
-            });
-        }
 
         await _orders.AddAsync(order, ct);
         await _orders.SaveChangesAsync(ct);
@@ -210,7 +176,7 @@ public class OrderIngestionAgent
             await _bus.PublishAsync(ServiceBusQueues.Notifications, new NotificationMessage(
                 Guid.NewGuid(), company.Id, NotificationType.OrderReceived,
                 "Order Received",
-                $"Order with {order.Items.Count} items for {order.StoreName}.",
+                $"Order received for {order.StoreName}.",
                 order.Id, null, null, null, DateTime.UtcNow), ct);
         }
         catch (Exception ex)
@@ -218,15 +184,13 @@ public class OrderIngestionAgent
             _logger.LogWarning(ex, "Order {OrderId} saved but notification publish failed (queue unavailable)", order.Id);
         }
 
-        _logger.LogInformation("Ingested order {OrderId} with {ItemCount} items", order.Id, order.Items.Count);
+        _logger.LogInformation("Ingested order {OrderId} for {Store}", order.Id, order.StoreName);
 
         var ok = req.CreateResponse(HttpStatusCode.Accepted);
         await ok.WriteAsJsonAsync(new
         {
-            orderId = order.Id,
+            orderId   = order.Id,
             storeName = order.StoreName,
-            itemCount = order.Items.Count,
-            items = order.Items.Select(i => new { i.Id, i.Sku, i.Name, i.Quantity }),
         }, ct);
         return ok;
     }

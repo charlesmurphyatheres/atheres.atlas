@@ -113,6 +113,10 @@ public class ConfirmationAgent
     /// <summary>
     /// HTTP GET: store clicks link in email to confirm delivery.
     /// GET /api/confirmations/confirm?token={token}
+    ///
+    /// Intentionally anonymous: the caller is a dispensary employee clicking
+    /// a one-time link from email, not a logged-in app user. The URL token
+    /// (Order.ConfirmationToken) is the credential and is single-use.
     /// </summary>
     [Function(nameof(ConfirmDeliveryByEmail))]
     public async Task<HttpResponseData> ConfirmDeliveryByEmail(
@@ -133,6 +137,9 @@ public class ConfirmationAgent
     /// <summary>
     /// HTTP GET: store clicks reject link in email to decline delivery.
     /// GET /api/confirmations/reject?token={token}
+    ///
+    /// Intentionally anonymous for the same reason as ConfirmDeliveryByEmail:
+    /// the URL token authenticates the click, not a JWT.
     /// </summary>
     [Function(nameof(RejectDelivery))]
     public async Task<HttpResponseData> RejectDelivery(

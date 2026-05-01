@@ -30,4 +30,9 @@ public class RegisterDto
     /// SuperAdmin can specify any company.
     /// </summary>
     public Guid? CompanyId { get; set; }
+
+    /// <summary>Warehouse to pin the user to. Required when Role is
+    /// OrderImporter — every order they create or see is filtered to this
+    /// warehouse. Ignored for other roles.</summary>
+    public Guid? WarehouseId { get; set; }
 }

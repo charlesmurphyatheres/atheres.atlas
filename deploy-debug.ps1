@@ -553,31 +553,6 @@ npm run dev
     $feProc = Start-Process pwsh -ArgumentList "-NoExit", "-Command", $feScript -PassThru
     $trackedPids += $feProc.Id
     Write-Ok "Frontend started (PID: $($feProc.Id))"
-
-    # ---- Start Demo App (port 3001) ----
-    Write-Header "Starting Demo app on port 3001"
-
-    $demoDir = Join-Path $root "Atheres.Atlas.Demo"
-
-    if (-not (Test-Path (Join-Path $demoDir "node_modules"))) {
-        Write-Info "Installing demo npm dependencies..."
-        Push-Location $demoDir
-        npm install
-        Pop-Location
-    }
-
-    $demoScript = @"
-`$Host.UI.RawUI.WindowTitle = 'Atlas Demo :3001'
-Set-Location '$demoDir'
-Write-Host '=== Atheres.Atlas.Demo (port 3001) ===' -ForegroundColor Cyan
-Write-Host 'Demo order generator — separate from main application' -ForegroundColor Yellow
-Write-Host ''
-npm run dev
-"@
-
-    $demoProc = Start-Process pwsh -ArgumentList "-NoExit", "-Command", $demoScript -PassThru
-    $trackedPids += $demoProc.Id
-    Write-Ok "Demo app started (PID: $($demoProc.Id))"
 }
 
 # ---- Save PIDs for -Stop ------------------------------------
@@ -648,7 +623,6 @@ Write-Host "    Auth API         " -NoNewline; Write-Host "http://localhost:7072
 Write-Host "    Swagger UI       " -NoNewline; Write-Host "http://localhost:7071/api/swagger" -ForegroundColor Green
 if (-not $NoFrontend) {
     Write-Host "    Frontend         " -NoNewline; Write-Host "http://localhost:3000" -ForegroundColor Green
-    Write-Host "    Demo Simulator   " -NoNewline; Write-Host "http://localhost:3001" -ForegroundColor Yellow
 }
 Write-Host ""
 

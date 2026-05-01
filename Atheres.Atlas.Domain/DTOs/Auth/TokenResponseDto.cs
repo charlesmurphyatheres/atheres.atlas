@@ -14,4 +14,12 @@ public class TokenResponseDto
     public Guid?   CompanyId   { get; set; }
     public string? CompanyName { get; set; }
     public string? CompanySlug { get; set; }
+
+    /// <summary>FK to Warehouses — set for OrderImporter accounts.</summary>
+    public Guid?   WarehouseId   { get; set; }
+    public string? WarehouseName { get; set; }
+
+    /// <summary>True when the user must change password before doing
+    /// anything else (admin-created accounts on first login).</summary>
+    public bool MustChangePassword { get; set; }
 }

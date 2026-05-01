@@ -291,15 +291,15 @@ public class BatchAgent
     }
 
     // -----------------------------------------------------------------------
-    // POST /api/ready-to-pickup  (public — called by warehouse systems)
+    // POST /api/ready-to-pickup  (Admin / SuperAdmin / Logistics)
     // Body: { warehouseLicenseNumber, pickupDateTime }
     // Auto-creates a batch with all Ordered orders for that warehouse,
-    // sets them to Scheduled, and triggers route optimization.
+    // sets them to Scheduled, and triggers route optimization. Inherits
+    // the class-level role gate; no [AllowAnonymous] override.
     // -----------------------------------------------------------------------
     [Function("batches-ready-to-pickup")]
-    [AllowAnonymous]
     public async Task<IActionResult> ReadyToPickup(
-        [HttpTrigger(AuthorizationLevel.Function, "post", Route = "ready-to-pickup")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "ready-to-pickup")]
         HttpRequest req, CancellationToken ct)
     {
         Domain.DTOs.ReadyToPickupDto? dto;
@@ -323,33 +323,12 @@ public class BatchAgent
         if (warehouse is null)
             return new NotFoundObjectResult(new { error = $"Warehouse not found: {dto.WarehouseLicenseNumber} for company {dto.CompanySlug}" });
 
-        // Load all Ordered orders for this warehouse with their items
-        var allOrders = await _db.Orders.IgnoreQueryFilters()
-            .Include(o => o.Items)
+        // Pull every Ordered order at this warehouse — orders are sales-order
+        // level only (no per-item readiness), so the warehouse signaling
+        // "ready to pickup" implicitly marks every pending order ready.
+        var orders = await _db.Orders.IgnoreQueryFilters()
             .Where(o => o.WarehouseId == warehouse.Id && o.CompanyId == company.Id && o.Status == OrderStatus.Ordered)
             .ToListAsync(ct);
-
-        if (allOrders.Count == 0)
-            return new OkObjectResult(new { message = "No pending orders for this warehouse.", orderCount = 0 });
-
-        // Mark which items are confirmed ready by SKU
-        if (dto.ReadySkus is { Count: > 0 })
-        {
-            var readySet = new HashSet<string>(dto.ReadySkus, StringComparer.OrdinalIgnoreCase);
-            foreach (var order in allOrders)
-                foreach (var item in order.Items)
-                    item.IsConfirmedReady = readySet.Contains(item.Sku);
-        }
-        else
-        {
-            // No SKUs listed — all items are ready
-            foreach (var order in allOrders)
-                foreach (var item in order.Items)
-                    item.IsConfirmedReady = true;
-        }
-
-        // Only include orders where at least one item is confirmed ready
-        var orders = allOrders.Where(o => o.Items.Any(i => i.IsConfirmedReady)).ToList();
 
         if (orders.Count == 0)
             return new OkObjectResult(new { message = "No pending orders for this warehouse.", orderCount = 0 });

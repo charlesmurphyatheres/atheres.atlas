@@ -16,6 +16,16 @@ public class ApplicationUser : IdentityUser
     /// <summary>FK to Trucks — set for Driver accounts so they see only their route.</summary>
     public Guid? AssignedTruckId { get; set; }
 
+    /// <summary>FK to Warehouses — set for OrderImporter accounts so all
+    /// imports/orders they touch are scoped to a single warehouse.</summary>
+    public Guid? AssignedWarehouseId { get; set; }
+
+    /// <summary>True when the user must change their password before doing
+    /// anything else. Set when an admin creates an OrderImporter (the
+    /// invitation flow emails the temp password and forces a reset on
+    /// first login). Cleared by the change-password endpoint.</summary>
+    public bool MustChangePassword { get; set; } = false;
+
     public bool IsActive    { get; set; } = true;
     public DateTime CreatedAt   { get; set; } = DateTime.UtcNow;
     public DateTime? LastLoginAt { get; set; }

@@ -82,7 +82,6 @@ public class Order
     public OrderBatch?    Batch     { get; set; }
     public Warehouse?     Warehouse { get; set; }
     public DeliveryRoute? Route     { get; set; }
-    public ICollection<OrderItem> Items { get; set; } = new List<OrderItem>();
     public ICollection<DeliveryConfirmation> Confirmations { get; set; } = new List<DeliveryConfirmation>();
     public ICollection<AuditLog> AuditLogs { get; set; } = new List<AuditLog>();
 

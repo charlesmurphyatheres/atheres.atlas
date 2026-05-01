@@ -65,6 +65,8 @@ public class UsersFunctions
                 roles,
                 companyId = u.CompanyId,
                 assignedTruckId = u.AssignedTruckId,
+                assignedWarehouseId = u.AssignedWarehouseId,
+                mustChangePassword = u.MustChangePassword,
                 isActive = u.IsActive,
                 lastLoginAt = u.LastLoginAt,
             });

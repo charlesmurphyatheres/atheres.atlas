@@ -53,6 +53,9 @@ public sealed class TokenService : ITokenService
         if (user.AssignedTruckId.HasValue)
             claims.Add(new Claim("truckId", user.AssignedTruckId.Value.ToString()));
 
+        if (user.AssignedWarehouseId.HasValue)
+            claims.Add(new Claim("warehouseId", user.AssignedWarehouseId.Value.ToString()));
+
         foreach (var role in roles)
             claims.Add(new Claim(ClaimTypes.Role, role));
 
@@ -127,6 +130,15 @@ public sealed class TokenService : ITokenService
             companySlug = co?.Slug;
         }
 
+        string? warehouseName = null;
+        if (user.AssignedWarehouseId.HasValue)
+        {
+            var wh = await _businessDb.Warehouses
+                .IgnoreQueryFilters()
+                .FirstOrDefaultAsync(w => w.Id == user.AssignedWarehouseId.Value, ct);
+            warehouseName = wh?.BusinessName;
+        }
+
         return new TokenResponseDto
         {
             AccessToken  = accessToken,
@@ -139,6 +151,9 @@ public sealed class TokenService : ITokenService
             CompanyId    = user.CompanyId,
             CompanyName  = companyName,
             CompanySlug  = companySlug,
+            WarehouseId  = user.AssignedWarehouseId,
+            WarehouseName = warehouseName,
+            MustChangePassword = user.MustChangePassword,
         };
     }
 

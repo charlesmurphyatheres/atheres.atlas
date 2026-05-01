@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Atheres.Atlas.Auth.Functions.Services;
 using Atheres.Atlas.Data;
@@ -10,6 +11,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
 namespace Atheres.Atlas.Auth.Functions.Functions;
@@ -20,6 +22,7 @@ public class AuthFunctions
     private readonly SignInManager<ApplicationUser> _signIn;
     private readonly ITokenService                 _tokens;
     private readonly AtlasDbContext                _db;
+    private readonly IEmailService                 _email;
     private readonly ILogger<AuthFunctions>        _log;
 
     private static Guid? GetCallerCompanyId(HttpRequest req)
@@ -38,12 +41,14 @@ public class AuthFunctions
         SignInManager<ApplicationUser> signIn,
         ITokenService                 tokens,
         AtlasDbContext                db,
+        IEmailService                 email,
         ILogger<AuthFunctions>        log)
     {
         _users  = users;
         _signIn = signIn;
         _tokens = tokens;
         _db     = db;
+        _email  = email;
         _log    = log;
     }
 
@@ -102,16 +107,47 @@ public class AuthFunctions
             return new BadRequestObjectResult(new { error = "Company administrators can only assign Logistics or Driver roles." });
         }
 
+        // OrderImporter accounts are pinned to a single warehouse — every
+        // order they upload is scoped to it, and they only see orders from
+        // it. The selection is mandatory at create time so the account is
+        // never in a state where it has no warehouse to import into.
+        Guid? assignedWarehouseId = null;
+        if (string.Equals(role, Roles.OrderImporter, StringComparison.OrdinalIgnoreCase))
+        {
+            if (!dto.WarehouseId.HasValue)
+                return new BadRequestObjectResult(new { error = "Order Importer accounts must be assigned to a warehouse." });
+
+            var warehouse = await _db.Warehouses.IgnoreQueryFilters()
+                .FirstOrDefaultAsync(w => w.Id == dto.WarehouseId.Value && w.IsActive);
+            if (warehouse is null)
+                return new BadRequestObjectResult(new { error = "Selected warehouse not found or inactive." });
+
+            if (warehouse.CompanyId != targetCompanyId)
+                return new BadRequestObjectResult(new { error = "Selected warehouse does not belong to the target company." });
+
+            assignedWarehouseId = warehouse.Id;
+        }
+
+        // The admin enters everything except the password — the system
+        // generates a one-time temporary password, emails it to the new
+        // user, and forces a reset on first login. This stops admins from
+        // ever holding an importer's real credentials.
+        var isImporter        = string.Equals(role, Roles.OrderImporter, StringComparison.OrdinalIgnoreCase);
+        var temporaryPassword = isImporter ? GenerateTemporaryPassword() : null;
+        var passwordToUse     = temporaryPassword ?? dto.Password;
+
         var user = new ApplicationUser
         {
-            UserName  = dto.Email,
-            Email     = dto.Email,
-            FirstName = dto.FirstName,
-            LastName  = dto.LastName,
-            CompanyId = targetCompanyId,
+            UserName            = dto.Email,
+            Email               = dto.Email,
+            FirstName           = dto.FirstName,
+            LastName            = dto.LastName,
+            CompanyId           = targetCompanyId,
+            AssignedWarehouseId = assignedWarehouseId,
+            MustChangePassword  = isImporter,
         };
 
-        var result = await _users.CreateAsync(user, dto.Password);
+        var result = await _users.CreateAsync(user, passwordToUse);
         if (!result.Succeeded)
         {
             return new BadRequestObjectResult(new
@@ -123,10 +159,87 @@ public class AuthFunctions
 
         await _users.AddToRoleAsync(user, role);
 
-        _log.LogInformation("New user registered: {Email} as {Role} in company {Company}",
-            dto.Email, role, targetCompanyId);
+        if (isImporter && temporaryPassword is not null)
+        {
+            await SendInvitationEmailAsync(user, temporaryPassword);
+        }
 
-        return new OkObjectResult(new { message = "Registration successful.", userId = user.Id });
+        _log.LogInformation("New user registered: {Email} as {Role} in company {Company} (warehouse {Warehouse})",
+            dto.Email, role, targetCompanyId, assignedWarehouseId);
+
+        return new OkObjectResult(new
+        {
+            message            = "Registration successful.",
+            userId             = user.Id,
+            invitationEmailed  = isImporter,
+        });
+    }
+
+    /// <summary>
+    /// Generates a temporary password that satisfies the Identity password
+    /// policy (8+ chars, upper, digit, non-alphanumeric). Used for the
+    /// OrderImporter invitation flow.
+    /// </summary>
+    private static string GenerateTemporaryPassword()
+    {
+        // Cryptographically random body + a fixed-shape suffix that
+        // guarantees the result passes the configured Identity rules
+        // (uppercase letter, digit, special character).
+        const string alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+        var body = new char[10];
+        var bytes = RandomNumberGenerator.GetBytes(body.Length);
+        for (var i = 0; i < body.Length; i++)
+            body[i] = alphabet[bytes[i] % alphabet.Length];
+        return $"Tmp!{new string(body)}9";
+    }
+
+    private async Task SendInvitationEmailAsync(ApplicationUser user, string temporaryPassword)
+    {
+        var subject = "Your Atlas Deliver invitation — change your password";
+        var greeting = string.IsNullOrWhiteSpace(user.FirstName) ? "there" : user.FirstName;
+
+        var html = $"""
+            <div style="font-family:Arial,sans-serif;color:#111;max-width:560px;">
+              <h2 style="color:#1f2937;margin-bottom:8px;">Welcome to Atlas Deliver, {System.Net.WebUtility.HtmlEncode(greeting)}</h2>
+              <p>An administrator has created an Order Importer account for you. Use the temporary credentials below to sign in. <strong>You will be required to change your password immediately on first login.</strong></p>
+              <div style="background:#f3f4f6;border:1px solid #d1d5db;border-radius:8px;padding:16px;margin:16px 0;">
+                <p style="margin:0 0 4px 0;"><strong>Email:</strong> {System.Net.WebUtility.HtmlEncode(user.Email ?? string.Empty)}</p>
+                <p style="margin:0;"><strong>Temporary password:</strong> <span style="font-family:Consolas,monospace;background:#fff;padding:2px 6px;border-radius:4px;border:1px solid #e5e7eb;">{System.Net.WebUtility.HtmlEncode(temporaryPassword)}</span></p>
+              </div>
+              <p>If you did not expect this invitation, please ignore the message — the temporary password is not usable until you change it on first login.</p>
+              <p style="color:#6b7280;font-size:12px;margin-top:24px;">— Atlas Deliver</p>
+            </div>
+            """;
+
+        var plain = $"""
+            Welcome to Atlas Deliver, {greeting}.
+
+            An administrator has created an Order Importer account for you.
+            Use these temporary credentials to sign in — you will be required
+            to change your password immediately on first login.
+
+              Email:               {user.Email}
+              Temporary password:  {temporaryPassword}
+
+            If you did not expect this invitation, please ignore the message.
+            """;
+
+        var sent = await _email.SendAsync(new EmailRequest(
+            To:            user.Email ?? string.Empty,
+            ToName:        user.FullName,
+            Subject:       subject,
+            HtmlBody:      html,
+            PlainTextBody: plain));
+
+        if (!sent)
+        {
+            // Logged but non-fatal — the admin can resend manually if the
+            // first attempt fails (e.g. SendGrid outage). The account is
+            // already created with the temp password and MustChangePassword
+            // flag, so the invitation email can be retried via a future
+            // resend endpoint without re-creating the user.
+            _log.LogWarning("Invitation email failed to send for {Email}; account is still active.", user.Email);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -180,6 +293,14 @@ public class AuthFunctions
             companySlug = co?.Slug;
         }
 
+        string? warehouseName = null;
+        if (user.AssignedWarehouseId.HasValue)
+        {
+            var wh = await _db.Warehouses.IgnoreQueryFilters()
+                .FirstOrDefaultAsync(w => w.Id == user.AssignedWarehouseId.Value, ct);
+            warehouseName = wh?.BusinessName;
+        }
+
         return new OkObjectResult(new TokenResponseDto
         {
             AccessToken  = accessToken,
@@ -192,7 +313,67 @@ public class AuthFunctions
             CompanyId    = user.CompanyId,
             CompanyName  = companyName,
             CompanySlug  = companySlug,
+            WarehouseId  = user.AssignedWarehouseId,
+            WarehouseName = warehouseName,
+            MustChangePassword = user.MustChangePassword,
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // POST /api/auth/change-password
+    // Authenticated. Used to satisfy the MustChangePassword flag set when
+    // an admin creates a new account via the invitation flow, and is also
+    // available to any user who wants to rotate their password voluntarily.
+    // -----------------------------------------------------------------------
+    [Function("auth-change-password")]
+    [Authorize]
+    public async Task<IActionResult> ChangePassword(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "auth/change-password")]
+        HttpRequest req,
+        CancellationToken ct)
+    {
+        ChangePasswordDto? dto;
+        try { dto = await JsonSerializer.DeserializeAsync<ChangePasswordDto>(req.Body, _json, ct); }
+        catch { return new BadRequestObjectResult(new { error = "Invalid JSON body." }); }
+
+        if (dto is null
+            || string.IsNullOrWhiteSpace(dto.CurrentPassword)
+            || string.IsNullOrWhiteSpace(dto.NewPassword))
+        {
+            return new BadRequestObjectResult(new { error = "CurrentPassword and NewPassword are required." });
+        }
+
+        var userId = req.HttpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        if (string.IsNullOrWhiteSpace(userId))
+            return Unauthorized("Not authenticated.");
+
+        var user = await _users.FindByIdAsync(userId);
+        if (user is null || !user.IsActive)
+            return new NotFoundObjectResult(new { error = "User not found." });
+
+        var result = await _users.ChangePasswordAsync(user, dto.CurrentPassword, dto.NewPassword);
+        if (!result.Succeeded)
+        {
+            return new BadRequestObjectResult(new
+            {
+                error  = "Password change failed.",
+                errors = result.Errors.Select(e => e.Description),
+            });
+        }
+
+        if (user.MustChangePassword)
+        {
+            user.MustChangePassword = false;
+            await _users.UpdateAsync(user);
+        }
+
+        // Invalidate any refresh tokens issued under the old password. The
+        // caller must reauthenticate to pick up a fresh access+refresh pair
+        // (frontend handles this by routing back through the login flow).
+        await _tokens.RevokeAllAsync(user.Id, "password-changed", ct);
+
+        _log.LogInformation("Password changed for {UserId}", user.Id);
+        return new OkObjectResult(new { message = "Password updated. Please sign in again." });
     }
 
     // -----------------------------------------------------------------------

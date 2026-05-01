@@ -124,6 +124,7 @@ var host = new HostBuilder()
 
         // ---- Application services ----------------------------------------
         services.AddScoped<ITokenService, TokenService>();
+        services.AddSingleton<IEmailService, SendGridEmailService>();
     })
     .Build();
 
@@ -203,10 +204,8 @@ static async Task SeedAsync(IServiceProvider services)
         new SeedUser("ken@atheres.com",          "Phone@3313059708",  "Ken",    "Administrator", null,              Roles.SuperAdmin),
         new SeedUser("secure@gmail.com",         "Secure@1234567890", "Secure", "Admin",         secureTransportId, Roles.Admin),
         new SeedUser("secureuser@gmail.com",     "Secure@1234567890", "Secure", "User",          secureTransportId, Roles.Driver),
-        new SeedUser("securedatauser@gmail.com", "Secure@123457890",  "Secure", "Data",          secureTransportId, Roles.OrderImporter),
         new SeedUser("demo@atheres.com",         "Phone@3464978286",  "Demo",   "Admin",         demoCompanyId,     Roles.Admin),
         new SeedUser("demouser@atheres.com",     "Phone@3464978286",  "Demo",   "User",          demoCompanyId,     Roles.Driver),
-        new SeedUser("demodatauser@atheres.com", "Phone@3464978286",  "Demo",   "Data",          demoCompanyId,     Roles.OrderImporter),
     });
 
     foreach (var u in users)
@@ -233,6 +232,115 @@ static async Task SeedAsync(IServiceProvider services)
         await userManager.AddToRoleAsync(appUser, u.Role);
         logger.LogInformation("Seed: created {Email} as {Role}", u.Email, u.Role);
     }
+
+    // ---- 4. Cleanup: drop the legacy single-account data users that were
+    //         seeded before importers became warehouse-pinned. Hard delete
+    //         is safe here — they're seed data, never real users, and any
+    //         FKs that pointed at them have been removed in prior migrations.
+    foreach (var legacyEmail in new[] { "securedatauser@gmail.com", "demodatauser@atheres.com" })
+    {
+        var legacy = await userManager.FindByEmailAsync(legacyEmail);
+        if (legacy is null) continue;
+        var dropResult = await userManager.DeleteAsync(legacy);
+        if (dropResult.Succeeded)
+            logger.LogInformation("Seed: removed legacy data user {Email}", legacyEmail);
+        else
+            logger.LogWarning("Seed: failed to remove legacy data user {Email}: {Errors}",
+                legacyEmail, string.Join("; ", dropResult.Errors.Select(e => e.Description)));
+    }
+
+    // ---- 5. Per-warehouse OrderImporter accounts for Secure Transport -------
+    await SeedWarehouseImportersAsync(
+        businessDb, userManager,
+        secureTransportId,
+        emailDomain:    "securetransport.com",
+        password:       "Secure@1234567890",
+        maxToSeed:      5,
+        logger:         logger);
+}
+
+/// <summary>
+/// Creates OrderImporter accounts pinned to the first <paramref name="maxToSeed"/>
+/// warehouses (alphabetical by BusinessName) of the given company. Each
+/// account's username is "data_{slug-of-business-name}@{emailDomain}".
+/// Idempotent: skips warehouses whose corresponding email already exists.
+/// No-op when the company has no warehouses yet (warehouses are loaded
+/// out-of-band by import-data.ps1, not in this seed).
+/// </summary>
+static async Task SeedWarehouseImportersAsync(
+    AtlasDbContext db,
+    UserManager<ApplicationUser> userManager,
+    Guid companyId,
+    string emailDomain,
+    string password,
+    int maxToSeed,
+    ILogger logger)
+{
+    var warehouses = await db.Warehouses
+        .IgnoreQueryFilters()
+        .Where(w => w.CompanyId == companyId && w.IsActive)
+        .OrderBy(w => w.BusinessName)
+        .Take(maxToSeed)
+        .ToListAsync();
+
+    if (warehouses.Count == 0)
+    {
+        logger.LogInformation(
+            "Seed: no warehouses for company {Company} — skipping OrderImporter seed. "
+            + "Run import-data.ps1 to load warehouses, then restart the Auth Functions to seed importers.",
+            companyId);
+        return;
+    }
+
+    foreach (var wh in warehouses)
+    {
+        var slug = SlugifyForEmail(wh.BusinessName);
+        if (string.IsNullOrEmpty(slug))
+        {
+            logger.LogWarning("Seed: warehouse {Id} has unusable BusinessName '{Name}' — skipping.", wh.Id, wh.BusinessName);
+            continue;
+        }
+
+        var email = $"data_{slug}@{emailDomain}";
+        if (await userManager.FindByEmailAsync(email) is not null) continue;
+
+        var user = new ApplicationUser
+        {
+            UserName            = email,
+            Email               = email,
+            FirstName           = "Data",
+            LastName            = wh.BusinessName,
+            CompanyId           = companyId,
+            AssignedWarehouseId = wh.Id,
+            // Seed accounts skip the invitation flow — the password is
+            // already a known dev/QA credential, so there's no first-login
+            // forced reset.
+            MustChangePassword  = false,
+        };
+
+        var result = await userManager.CreateAsync(user, password);
+        if (!result.Succeeded)
+        {
+            logger.LogWarning("Seed: failed to create importer {Email} for warehouse {Warehouse}: {Errors}",
+                email, wh.BusinessName, string.Join("; ", result.Errors.Select(e => e.Description)));
+            continue;
+        }
+
+        await userManager.AddToRoleAsync(user, Roles.OrderImporter);
+        logger.LogInformation(
+            "Seed: created OrderImporter {Email} pinned to warehouse {Warehouse}",
+            email, wh.BusinessName);
+    }
+}
+
+/// <summary>Reduces an arbitrary BusinessName to lowercase a-z/0-9 only so it
+/// safely embeds in an email local-part (e.g. "Ascend Illinois - Barry" →
+/// "ascendillinoisbarry"). Returns empty string when nothing survives.</summary>
+static string SlugifyForEmail(string? name)
+{
+    if (string.IsNullOrWhiteSpace(name)) return string.Empty;
+    var lowered = name.ToLowerInvariant();
+    return new string(lowered.Where(char.IsLetterOrDigit).ToArray());
 }
 
 static async Task UpsertCompanyAsync(AtlasDbContext db, Guid id, string name, string slug, string contactEmail)

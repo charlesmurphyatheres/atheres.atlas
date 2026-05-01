@@ -268,29 +268,6 @@ services:
       - atlas-net
 
   # -----------------------------------------------------------
-  # Demo Order Simulator  (separate mobile-friendly app)
-  # -----------------------------------------------------------
-  demo:
-    build:
-      context: ./Atheres.Atlas.Demo
-      dockerfile: Dockerfile
-    container_name: atlas-demo
-    depends_on:
-      functions:
-        condition: service_healthy
-      auth:
-        condition: service_healthy
-    ports:
-      - "3001:80"
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    networks:
-      - atlas-net
-
-  # -----------------------------------------------------------
   # Nginx Reverse Proxy  (public entry point — port 80)
   # -----------------------------------------------------------
   nginx:

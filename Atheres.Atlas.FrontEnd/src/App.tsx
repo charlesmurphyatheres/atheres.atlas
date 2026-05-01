@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Routes, Route, NavLink, useNavigate } from 'react-router-dom'
+import { Routes, Route, NavLink, Navigate, useNavigate } from 'react-router-dom'
 import Dashboard from './components/Dashboard'
 import OrderList from './components/OrderList'
 import LiveRouteTracker from './components/LiveRouteTracker'
@@ -7,9 +7,11 @@ import CompanyPicker from './components/CompanyPicker'
 import SettingsPanel from './components/SettingsPanel'
 import NotificationPanel from './components/NotificationPanel'
 import LoginPage from './components/auth/LoginPage'
+import ChangePasswordPage from './components/auth/ChangePasswordPage'
 import ProtectedRoute from './components/ProtectedRoute'
 import AdminPanel from './components/admin/AdminPanel'
 import OrderImportPanel from './components/import/OrderImportPanel'
+import ImporterDashboard from './components/import/ImporterDashboard'
 import LogisticsPanel from './components/logistics/LogisticsPanel'
 import CommunicationsDashboard from './components/CommunicationsDashboard'
 import DriverPanel from './components/driver/DriverPanel'
@@ -70,10 +72,24 @@ export default function App() {
   // as a single-purpose login the same way Driver is treated.
   const isImporter = user?.roles.includes('OrderImporter') && !isAdmin && !isLogistics && !isDriver
 
+  // Force-change-password gate: when an admin invites an OrderImporter the
+  // backend marks the account with mustChangePassword=true. Until they pick
+  // a new password, every authenticated route redirects to /change-password.
+  // The page itself is exempt so we don't infinite-loop.
+  const mustChangePassword = !!user?.mustChangePassword
+
   return (
     <div className="min-h-screen flex flex-col">
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route
+          path="/change-password"
+          element={
+            <ProtectedRoute>
+              <ChangePasswordPage />
+            </ProtectedRoute>
+          }
+        />
         <Route
           path="/unauthorized"
           element={
@@ -89,6 +105,9 @@ export default function App() {
           path="/*"
           element={
             <ProtectedRoute>
+              {mustChangePassword ? (
+                <Navigate to="/change-password" replace />
+              ) : (
               <div className="min-h-screen flex flex-col">
                 {/* Header */}
                 <header className="bg-white border-b border-gray-200 shadow-sm">
@@ -132,7 +151,7 @@ export default function App() {
                         )}
                         {/* Importer-only single landing page */}
                         {isImporter && (
-                          <NavLink to="/import" className={navLinkClass}>Import Orders</NavLink>
+                          <NavLink to="/" end className={navLinkClass}>Order Data</NavLink>
                         )}
                         {isAdmin && (
                           <NavLink to="/settings" className={navLinkClass}>Settings</NavLink>
@@ -172,7 +191,7 @@ export default function App() {
                         <Route path="/driver" element={<DriverPanel />} />
                       </>
                     ) : isImporter ? (
-                      <Route path="/" element={<OrderImportPanel />} />
+                      <Route path="/" element={<ImporterDashboard />} />
                     ) : (
                       <Route path="/" element={<Dashboard notifications={notifications} />} />
                     )}
@@ -193,7 +212,7 @@ export default function App() {
                     } />
                     <Route path="/import" element={
                       <ProtectedRoute roles={['Admin', 'SuperAdmin', 'OrderImporter']}>
-                        <OrderImportPanel />
+                        {isImporter ? <ImporterDashboard /> : <OrderImportPanel />}
                       </ProtectedRoute>
                     } />
                     <Route path="/communications" element={
@@ -219,6 +238,7 @@ export default function App() {
                   </Routes>
                 </main>
               </div>
+              )}
             </ProtectedRoute>
           }
         />

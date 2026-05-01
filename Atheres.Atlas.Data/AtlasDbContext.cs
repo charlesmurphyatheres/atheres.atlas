@@ -25,8 +25,6 @@ public class AtlasDbContext : DbContext
     public DbSet<DeliveryConfirmation> Confirmations => Set<DeliveryConfirmation>();
     public DbSet<AuditLog>         AuditLogs       => Set<AuditLog>();
     public DbSet<UserRouteSettings> UserRouteSettings => Set<UserRouteSettings>();
-    public DbSet<Product>          Products          => Set<Product>();
-    public DbSet<OrderItem>        OrderItems        => Set<OrderItem>();
     public DbSet<Store>            Stores            => Set<Store>();
     public DbSet<Hub>              Hubs              => Set<Hub>();
     public DbSet<OrderBatch>       OrderBatches      => Set<OrderBatch>();

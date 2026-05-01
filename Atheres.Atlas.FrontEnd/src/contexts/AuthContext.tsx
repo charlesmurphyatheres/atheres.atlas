@@ -25,6 +25,9 @@ function tokenToUser(res: TokenResponse): AuthUser {
     companyId: res.companyId,
     companyName: res.companyName,
     companySlug: res.companySlug,
+    warehouseId: res.warehouseId,
+    warehouseName: res.warehouseName,
+    mustChangePassword: res.mustChangePassword,
   }
 }
 

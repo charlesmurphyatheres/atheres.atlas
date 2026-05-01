@@ -4,7 +4,8 @@ namespace Atheres.Atlas.Domain.DTOs;
 
 /// <summary>
 /// Incoming order from warehouse systems. Identified by license numbers.
-/// Store and warehouse details are resolved from the master data.
+/// Store and warehouse details are resolved from the master data; the order
+/// is created at sales-order level (no per-line product detail).
 /// </summary>
 public class OrderInputDto
 {
@@ -21,24 +22,15 @@ public class OrderInputDto
     [JsonPropertyName("orderDate")]
     public DateTime OrderDate { get; set; }
 
+    [JsonPropertyName("salesOrderNumber")]
+    public string? SalesOrderNumber { get; set; }
+
+    [JsonPropertyName("purchaseOrderNumber")]
+    public string? PurchaseOrderNumber { get; set; }
+
+    [JsonPropertyName("customer")]
+    public string? Customer { get; set; }
+
     [JsonPropertyName("notes")]
     public string? Notes { get; set; }
-
-    [JsonPropertyName("items")]
-    public List<OrderItemInputDto> Items { get; set; } = [];
-}
-
-public class OrderItemInputDto
-{
-    [JsonPropertyName("sku")]
-    public string Sku { get; set; } = string.Empty;
-
-    [JsonPropertyName("name")]
-    public string Name { get; set; } = string.Empty;
-
-    [JsonPropertyName("quantity")]
-    public int Quantity { get; set; } = 1;
-
-    [JsonPropertyName("category")]
-    public string? Category { get; set; }
 }
