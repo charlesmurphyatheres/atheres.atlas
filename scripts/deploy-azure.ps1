@@ -11,6 +11,13 @@
 # Usage:
 #   .\deploy-azure.ps1              # incremental; creates anything missing
 #   .\deploy-azure.ps1 -Clean       # delete the resource group first, then redeploy
+#   .\deploy-azure.ps1 -WipeOnly    # delete the resource group and exit (no redeploy).
+#                                   # Use when you want to nuke the entire stack —
+#                                   # site, SQL database, Functions, Front Door,
+#                                   # storage, Service Bus, SignalR, App Insights —
+#                                   # without provisioning anything new.
+#   .\deploy-azure.ps1 -Force       # skip the interactive "type WIPE to confirm"
+#                                   # prompt for -Clean / -WipeOnly. Use with care.
 #   .\deploy-azure.ps1 -SkipDnsWait # skip the interactive DNS-validation pause
 #   .\deploy-azure.ps1 -Diagnose    # run health checks against an existing deploy;
 #                                   # print status of Function Apps, runtimes, and
@@ -19,6 +26,8 @@
 [CmdletBinding()]
 param(
     [switch]$Clean,
+    [switch]$WipeOnly,
+    [switch]$Force,
     [switch]$SkipDnsWait,
     [switch]$Diagnose
 )
@@ -386,12 +395,39 @@ if ($Diagnose) {
 }
 
 # =============================================================
-# 3. CLEAN UP PREVIOUS DEPLOYMENT (only when -Clean is passed)
+# 3. CLEAN UP PREVIOUS DEPLOYMENT
 # =============================================================
+# -Clean wipes the resource group and continues with a fresh deploy.
+# -WipeOnly wipes the resource group and exits — for when you want a
+#   clean slate without immediately rebuilding.
+# Both prompt for explicit "WIPE" confirmation unless -Force is passed.
 
 $rgExists = az group exists --name $ResourceGroup 2>$null
-if ($Clean -and $rgExists -eq "true") {
-    Write-Host "`n=== -Clean specified; deleting resource group: $ResourceGroup ===" -ForegroundColor Yellow
+$wantWipe = $Clean -or $WipeOnly
+
+if ($wantWipe -and $rgExists -eq "true") {
+    if (-not $Force) {
+        $action = if ($WipeOnly) { "wipe ALL Atlas Deliver Azure resources (no redeploy)" }
+                  else           { "wipe ALL Atlas Deliver Azure resources, then redeploy" }
+        $sub = az account show --query name -o tsv 2>$null
+        Write-Host ""
+        Write-Host "  ==================== DESTRUCTIVE ACTION ====================" -ForegroundColor Red
+        Write-Host "  About to $action." -ForegroundColor Yellow
+        Write-Host "    Resource group: $ResourceGroup" -ForegroundColor Yellow
+        Write-Host "    Subscription:   $sub" -ForegroundColor Yellow
+        Write-Host "    Includes:       SQL server + AtheresAtlas database, both Function Apps," -ForegroundColor Yellow
+        Write-Host "                    Front Door, Storage, Service Bus, SignalR, App Insights." -ForegroundColor Yellow
+        Write-Host "    All data will be deleted. This cannot be undone." -ForegroundColor Yellow
+        Write-Host "  ============================================================" -ForegroundColor Red
+        Write-Host ""
+        $answer = Read-Host "  Type 'WIPE' to continue (anything else aborts)"
+        if ($answer -ne 'WIPE') {
+            Write-Host "  Cancelled — nothing was deleted." -ForegroundColor Green
+            exit 0
+        }
+    }
+
+    Write-Host "`n=== Deleting resource group: $ResourceGroup ===" -ForegroundColor Yellow
     az group delete --name $ResourceGroup --yes --no-wait --output none
     Assert-AzSuccess "Resource group delete"
 
@@ -410,9 +446,48 @@ if ($Clean -and $rgExists -eq "true") {
     if ($retries -eq 0) {
         throw "Resource group $ResourceGroup did not finish deleting within 40 minutes. Re-run when it's gone."
     }
-    Write-Host "  [OK] Previous deployment cleaned up." -ForegroundColor Green
+    Write-Host "  [OK] Resource group deleted." -ForegroundColor Green
+
+    # Purge any soft-deleted Log Analytics workspace with our well-known
+    # name. Azure retains deleted workspaces for 14 days by default; if we
+    # leave the tombstone in place, recreating with the same name later
+    # fails with "name not available." Best-effort: log + continue if the
+    # cleanup itself errors, since the next deploy will surface a clear
+    # message either way.
+    Write-Host "  Purging soft-deleted Log Analytics workspace if present..." -ForegroundColor Gray
+    $deletedJson = az monitor log-analytics workspace list-deleted-workspaces --query "[?name=='$LogWorkspace']" -o json 2>$null
+    if ($deletedJson -and $deletedJson -ne '[]') {
+        try {
+            # Recover into the (now-empty) RG, then delete with --force so the
+            # workspace name is reusable immediately.
+            az group create --name $ResourceGroup --location $Location --output none 2>$null | Out-Null
+            az monitor log-analytics workspace recover --resource-group $ResourceGroup --workspace-name $LogWorkspace --output none 2>$null
+            az monitor log-analytics workspace delete --resource-group $ResourceGroup --workspace-name $LogWorkspace --force true --yes --output none 2>$null
+            # Then drop the placeholder RG so the rest of the deploy starts truly clean.
+            az group delete --name $ResourceGroup --yes --output none 2>$null
+            Write-Host "  [OK] Soft-deleted workspace purged." -ForegroundColor Green
+        } catch {
+            Write-Host "  [WARN] Workspace purge failed: $($_.Exception.Message). The next deploy may need to use a different workspace name if it errors." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  No soft-deleted workspace to purge." -ForegroundColor Gray
+    }
+
+    if ($WipeOnly) {
+        $deployStopwatch.Stop()
+        Write-Host ""
+        Write-Host "=============================================================" -ForegroundColor Green
+        Write-Host "  WIPE COMPLETE in $(Format-Duration $deployStopwatch)" -ForegroundColor Green
+        Write-Host "  Resource group + soft-deleted dependencies removed." -ForegroundColor Green
+        Write-Host "  Re-run without -WipeOnly to provision a fresh stack." -ForegroundColor Green
+        Write-Host "=============================================================" -ForegroundColor Green
+        exit 0
+    }
+} elseif ($WipeOnly -and $rgExists -ne "true") {
+    Write-Host "`n=== -WipeOnly specified but resource group $ResourceGroup doesn't exist. Nothing to wipe. ===" -ForegroundColor Gray
+    exit 0
 } elseif ($rgExists -eq "true") {
-    Write-Host "`n=== Resource group $ResourceGroup exists -- incremental deploy (pass -Clean to wipe) ===" -ForegroundColor Gray
+    Write-Host "`n=== Resource group $ResourceGroup exists -- incremental deploy (pass -Clean to wipe + redeploy, or -WipeOnly to wipe + exit) ===" -ForegroundColor Gray
 }
 
 # =============================================================
@@ -1158,6 +1233,98 @@ $importScript = Join-Path $PSScriptRoot "import-data.ps1"
 if (Test-Path $importScript) {
     pwsh -File $importScript -ConnectionString $SqlConnectionString
     if ($LASTEXITCODE -ne 0) { throw "import-data.ps1 failed (exit $LASTEXITCODE)." }
+}
+
+# ---- Re-run the Auth seed now that warehouses exist ----------------------
+# SeedWarehouseImportersAsync (Atheres.Atlas.Auth.Functions/Program.cs) creates
+# one OrderImporter account per warehouse for Secure Transport. It runs from
+# the Auth Functions startup seed, but on the first deploy the seed runs
+# BEFORE import-data.ps1 has loaded any warehouses, so it logs
+# "no warehouses for company ... skipping OrderImporter seed" and exits. The
+# bootstrap users (ken/secure/demo/...) get created on that first pass; the
+# data importers do not. Restart the Auth Functions so the seed runs again
+# with warehouses present, then poll AspNetUsers to confirm the importers
+# actually landed.
+Write-Host "`n=== Re-running Auth seed for warehouse OrderImporter users ===" -ForegroundColor Cyan
+az functionapp restart --resource-group $ResourceGroup --name $FuncAppAuth --output none
+Assert-AzSuccess "$FuncAppAuth restart for importer seed"
+
+# System.Data.SqlClient ships with .NET but isn't auto-loaded under pwsh.
+# Force-load it once before the polling loop instantiates SqlConnection.
+Add-Type -AssemblyName System.Data -ErrorAction SilentlyContinue
+
+# Expected importer count = min(active Secure Transport warehouses, 5). Read
+# the actual warehouse count from the DB so we don't have to hard-code the
+# slugified emails -- those depend on whatever import-data.ps1 just loaded.
+function Get-ImporterSeedStatus {
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $conn = New-Object System.Data.SqlClient.SqlConnection $ConnectionString
+    try {
+        $conn.Open()
+
+        $whCmd = $conn.CreateCommand()
+        $whCmd.CommandText = @"
+SELECT COUNT(*) FROM (
+    SELECT TOP (5) Id FROM Warehouses
+    WHERE CompanyId = '10000000-0000-0000-0000-000000000001' AND IsActive = 1
+    ORDER BY BusinessName
+) w
+"@
+        $expected = [int]$whCmd.ExecuteScalar()
+
+        # SQL LIKE: underscore is a single-char wildcard. Bracket-escape it
+        # ('[_]') so we match the literal "data_" prefix and not "dataX".
+        $userCmd = $conn.CreateCommand()
+        $userCmd.CommandText = "SELECT COUNT(*) FROM AspNetUsers WHERE NormalizedEmail LIKE 'DATA[_]%@SECURETRANSPORT.COM'"
+        $actual = [int]$userCmd.ExecuteScalar()
+
+        return [pscustomobject]@{ Expected = $expected; Actual = $actual }
+    } finally {
+        $conn.Close()
+    }
+}
+
+$importerAttempts = 3
+$importerOk       = $false
+for ($attempt = 1; $attempt -le $importerAttempts -and -not $importerOk; $attempt++) {
+    $deadline = (Get-Date).AddMinutes(5)
+    $status   = $null
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $status = Get-ImporterSeedStatus -ConnectionString $SqlConnectionString
+        } catch {
+            Write-Host "`n  [warn] SQL probe failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            Start-Sleep 10
+            continue
+        }
+        if ($status.Expected -eq 0) {
+            # No warehouses to seed against -- import-data.ps1 didn't load any.
+            # Surface this loudly rather than waiting silently for nothing.
+            throw "No active Secure Transport warehouses in DB after import-data.ps1; importer seed cannot run. Check the import script's output."
+        }
+        if ($status.Actual -ge $status.Expected) { $importerOk = $true; break }
+        Start-Sleep 10
+        Write-Host "." -NoNewline -ForegroundColor DarkGray
+    }
+    Write-Host ""
+    if ($importerOk) {
+        Write-Host "  [OK] $($status.Actual)/$($status.Expected) OrderImporter users present." -ForegroundColor Green
+        break
+    }
+    if ($attempt -lt $importerAttempts) {
+        Write-Host "  [retry $attempt/$importerAttempts] Only $($status.Actual)/$($status.Expected) importer users present. Restarting $FuncAppAuth..." -ForegroundColor Yellow
+        az functionapp restart --resource-group $ResourceGroup --name $FuncAppAuth --output none
+        Assert-AzSuccess "$FuncAppAuth restart for importer seed retry"
+        Start-Sleep 20
+    } else {
+        throw @"
+OrderImporter users still missing after $importerAttempts restart attempts ($($status.Actual)/$($status.Expected)).
+The Auth Functions startup seed is not creating data_*@securetransport.com accounts.
+Inspect logs:
+  az webapp log tail -g $ResourceGroup -n $FuncAppAuth
+Then rerun .\deploy-azure.ps1 -- the seed is idempotent and will only add what's missing.
+"@
+    }
 }
 
 # Build + upload the main Frontend. Front Door proxies /api/* on $PublicUrl to
