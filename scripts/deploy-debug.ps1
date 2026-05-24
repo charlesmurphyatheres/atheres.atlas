@@ -111,7 +111,7 @@ if ($Stop) {
     docker compose stop sql azurite servicebus-sql servicebus 2>$null
     Pop-Location
     Write-Ok "All debug services stopped."
-    Write-Info "To wipe Docker volumes: .\deploy.ps1 -Clean"
+    Write-Info "To wipe Docker volumes: .\deploy-docker.ps1 -Clean"
     $deployStopwatch.Stop()
     Write-Host "  Duration: " -NoNewline; Write-Host (Format-Duration $deployStopwatch) -ForegroundColor Cyan
     exit 0
@@ -360,6 +360,17 @@ if (-not $SkipMigrations) {
     if ($LASTEXITCODE -ne 0) { Write-Err "Functions build failed."; exit 1 }
     dotnet build $authProjForMigration -c Debug --nologo -v minimal
     if ($LASTEXITCODE -ne 0) { Write-Err "Auth Functions build failed."; exit 1 }
+
+    # Restore the repo-local dotnet-ef tool (.config/dotnet-tools.json pins 8.0.11
+    # to match the EF Core packages). Without this, `dotnet ef` falls back to
+    # whatever the user has globally installed -- which on machines with the
+    # .NET 10 SDK is dotnet-ef 10.x, and that version blows up against our
+    # net8.0 assemblies with "Could not load System.Runtime, Version=10.0.0.0".
+    Write-Info "Restoring local dotnet-ef tool..."
+    Push-Location $root
+    dotnet tool restore --tool-manifest .config/dotnet-tools.json | Out-Null
+    Pop-Location
+    if ($LASTEXITCODE -ne 0) { Write-Err "dotnet tool restore failed."; exit 1 }
 
     Write-Info "Migrating AtlasDbContext..."
     Push-Location $dataDir

@@ -81,27 +81,61 @@ if (-not (Test-Path $storesFile)) {
     $stores = Import-Csv $storesFile
     Write-Info "Found $($stores.Count) stores in CSV"
 
-    $existingCount = Invoke-SqlScalar -Query "SELECT COUNT(*) FROM Stores WHERE CompanyId = '$CompanyId'" -ConnStr $ConnectionString
+    # Stores are many-to-many with Companies now (StoreCompanies join table).
+    # Deactivate junk rows that this company can see — same scope as before,
+    # just expressed via the join.
+    $deactivated = Invoke-Sql -Query @"
+UPDATE s
+SET    s.IsActive  = 0,
+       s.UpdatedAt = SYSUTCDATETIME()
+FROM   Stores s
+WHERE  s.IsActive = 1
+  AND  EXISTS (SELECT 1 FROM StoreCompanies sc WHERE sc.StoreId = s.Id AND sc.CompanyId = '$CompanyId')
+  AND (s.Name IS NULL OR LTRIM(RTRIM(s.Name)) = ''
+       OR s.LicenseNumber IS NULL OR LTRIM(RTRIM(s.LicenseNumber)) = '')
+"@ -ConnStr $ConnectionString
+    if ($deactivated -gt 0) { Write-Warn "Deactivated $deactivated blank/legacy store row(s)." }
+
+    $existingCount = Invoke-SqlScalar -Query @"
+SELECT COUNT(*) FROM Stores s
+WHERE  s.IsActive = 1
+  AND  EXISTS (SELECT 1 FROM StoreCompanies sc WHERE sc.StoreId = s.Id AND sc.CompanyId = '$CompanyId')
+"@ -ConnStr $ConnectionString
     if ($existingCount -gt 0) {
         Write-Warn "$existingCount stores already exist for this company. Skipping import (idempotent)."
     } else {
         $imported = 0
+        $skipped  = 0
         $now = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fff")
 
         foreach ($s in $stores) {
+            # Skip rows that would land in the table as blank — they'd never
+            # zone, never have a license to import orders against, and just
+            # clutter the dashboard.
+            $rawName    = if ($s.'Dispensary Name')  { $s.'Dispensary Name'.Trim() }  else { '' }
+            $rawLicense = if ($s.'License Number') { $s.'License Number'.Trim() } else { '' }
+            if (-not $rawName -or -not $rawLicense) {
+                $skipped++
+                continue
+            }
+
             $id = [Guid]::NewGuid().ToString()
             $customer = $s.'ST Customer' -replace "'", "''"
-            $name = $s.'Dispensary Name' -replace "'", "''"
+            $name = $rawName -replace "'", "''"
             $address = $s.'Street Address' -replace "'", "''"
             $city = $s.'City' -replace "'", "''"
             $zip = $s.'Zip Code' -replace "'", "''"
             $county = $s.'County' -replace "'", "''"
             $region = $s.'BLS Region' -replace "'", "''"
-            $license = $s.'License Number' -replace "'", "''"
+            $license = $rawLicense -replace "'", "''"
 
+            # Two-step insert: the row, then the membership link. Both run
+            # inside one connection so a failure on link insert can be
+            # observed (the store row exists but the catch reports it).
             $sql = @"
-INSERT INTO Stores (Id, CompanyId, Customer, Name, Address, City, State, Zip, County, Region, LicenseNumber, IsActive, CreatedAt, UpdatedAt)
-VALUES ('$id', '$CompanyId', N'$customer', N'$name', N'$address', N'$city', 'IL', '$zip', N'$county', N'$region', '$license', 1, '$now', '$now')
+INSERT INTO Stores (Id, Customer, Name, Address, City, State, Zip, County, Region, LicenseNumber, IsActive, CreatedAt, UpdatedAt)
+VALUES ('$id', N'$customer', N'$name', N'$address', N'$city', 'IL', '$zip', N'$county', N'$region', '$license', 1, '$now', '$now');
+INSERT INTO StoreCompanies (StoreId, CompanyId) VALUES ('$id', '$CompanyId');
 "@
             try {
                 Invoke-Sql -Query $sql -ConnStr $ConnectionString | Out-Null
@@ -110,8 +144,132 @@ VALUES ('$id', '$CompanyId', N'$customer', N'$name', N'$address', N'$city', 'IL'
                 Write-Warn "Failed to import store: $name - $_"
             }
         }
+        if ($skipped -gt 0) { Write-Warn "Skipped $skipped CSV row(s) with blank name or license." }
         Write-Ok "$imported stores imported."
     }
+}
+
+# ---- Import Districts, Zones, and link Stores ------------------
+# zones.csv carries one row per (zone, store license) assignment. We flatten
+# it into:
+#   1. Districts  — distinct (Number, Name) pairs (cols 3 + 4).
+#   2. Zones      — distinct (DistrictId, Code)   pairs (cols 1 + 3).
+#   3. Stores.ZoneId  — UPDATE by LicenseNumber match (col 2).
+# The block is idempotent: re-running skips districts/zones that already exist
+# and only updates Stores rows whose ZoneId is missing or out of date.
+# zones.csv has TWO columns both named "District", which would collide under
+# Import-Csv — split each line by comma manually instead.
+Write-Header "Importing Districts and Zones"
+
+$zonesFile = Join-Path $root "data\zones.csv"
+if (-not (Test-Path $zonesFile)) {
+    Write-Warn "zones.csv not found at $zonesFile — skipping."
+} else {
+    $zoneLines = Get-Content $zonesFile | Select-Object -Skip 1 | Where-Object { $_.Trim() -ne "" }
+    Write-Info "Found $($zoneLines.Count) zone rows in CSV"
+
+    $zoneRows = foreach ($line in $zoneLines) {
+        $f = $line.Split(',')
+        if ($f.Count -lt 4) { continue }
+        # District number arrives as plain int ("1","10") but coerce via double
+        # so a stray "1.0" in future data is still tolerated.
+        [pscustomobject]@{
+            ZoneCode       = $f[0].Trim()
+            License        = $f[1].Trim()
+            DistrictNumber = [int][double]$f[2].Trim()
+            DistrictName   = $f[3].Trim()
+        }
+    }
+
+    $now = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fff")
+
+    # ---- Districts -------------------------------------------------
+    $districtIdsByNumber = @{}
+    $districtsInserted   = 0
+    $districts = $zoneRows | Sort-Object DistrictNumber, DistrictName -Unique
+    foreach ($d in $districts) {
+        $existingId = Invoke-SqlScalar `
+            -Query   "SELECT TOP 1 CAST(Id AS NVARCHAR(36)) FROM Districts WHERE CompanyId='$CompanyId' AND Number=$($d.DistrictNumber)" `
+            -ConnStr $ConnectionString
+        if ($existingId) {
+            $districtIdsByNumber[$d.DistrictNumber] = $existingId
+            continue
+        }
+        $id   = [Guid]::NewGuid().ToString()
+        $name = $d.DistrictName -replace "'", "''"
+        $sql  = @"
+INSERT INTO Districts (Id, CompanyId, Number, Name, IsActive, CreatedAt, UpdatedAt)
+VALUES ('$id', '$CompanyId', $($d.DistrictNumber), N'$name', 1, '$now', '$now')
+"@
+        try {
+            Invoke-Sql -Query $sql -ConnStr $ConnectionString | Out-Null
+            $districtIdsByNumber[$d.DistrictNumber] = $id
+            $districtsInserted++
+        } catch {
+            Write-Warn "Failed to insert district $($d.DistrictNumber) ($name): $_"
+        }
+    }
+    Write-Ok "$districtsInserted districts inserted ($($districtIdsByNumber.Count) tracked)."
+
+    # ---- Zones -----------------------------------------------------
+    $zoneIdsByKey   = @{}
+    $zonesInserted  = 0
+    $zones = $zoneRows | Sort-Object DistrictNumber, ZoneCode -Unique
+    foreach ($z in $zones) {
+        $districtId = $districtIdsByNumber[$z.DistrictNumber]
+        if (-not $districtId) { Write-Warn "No district for $($z.DistrictNumber); skipping zone $($z.ZoneCode)"; continue }
+        $code = $z.ZoneCode -replace "'", "''"
+        $key  = "$districtId|$($z.ZoneCode)"
+        $existingId = Invoke-SqlScalar `
+            -Query   "SELECT TOP 1 CAST(Id AS NVARCHAR(36)) FROM Zones WHERE CompanyId='$CompanyId' AND DistrictId='$districtId' AND Code=N'$code'" `
+            -ConnStr $ConnectionString
+        if ($existingId) {
+            $zoneIdsByKey[$key] = $existingId
+            continue
+        }
+        $id  = [Guid]::NewGuid().ToString()
+        $sql = @"
+INSERT INTO Zones (Id, CompanyId, DistrictId, Code, IsActive, CreatedAt, UpdatedAt)
+VALUES ('$id', '$CompanyId', '$districtId', N'$code', 1, '$now', '$now')
+"@
+        try {
+            Invoke-Sql -Query $sql -ConnStr $ConnectionString | Out-Null
+            $zoneIdsByKey[$key] = $id
+            $zonesInserted++
+        } catch {
+            Write-Warn "Failed to insert zone $($z.ZoneCode) under district $($z.DistrictNumber): $_"
+        }
+    }
+    Write-Ok "$zonesInserted zones inserted ($($zoneIdsByKey.Count) tracked)."
+
+    # ---- Link Stores.ZoneId by LicenseNumber -----------------------
+    # The UPDATE is filtered to skip rows that already point at the correct
+    # zone, so the row count we sum represents real reassignments rather than
+    # no-op writes.
+    $storesLinked = 0
+    foreach ($r in $zoneRows) {
+        $districtId = $districtIdsByNumber[$r.DistrictNumber]
+        if (-not $districtId) { continue }
+        $zoneId = $zoneIdsByKey["$districtId|$($r.ZoneCode)"]
+        if (-not $zoneId) { continue }
+        $license = $r.License -replace "'", "''"
+        $sql = @"
+UPDATE s
+SET    s.ZoneId    = '$zoneId',
+       s.UpdatedAt = SYSUTCDATETIME()
+FROM   Stores s
+WHERE  s.LicenseNumber = N'$license'
+  AND  EXISTS (SELECT 1 FROM StoreCompanies sc WHERE sc.StoreId = s.Id AND sc.CompanyId = '$CompanyId')
+  AND (s.ZoneId IS NULL OR s.ZoneId <> '$zoneId')
+"@
+        try {
+            $updated = Invoke-Sql -Query $sql -ConnStr $ConnectionString
+            if ($updated -gt 0) { $storesLinked += $updated }
+        } catch {
+            Write-Warn "Failed to link store license $license to zone $($r.ZoneCode): $_"
+        }
+    }
+    Write-Ok "Linked $storesLinked store(s) to zones."
 }
 
 # ---- Import Warehouses -----------------------------------------
@@ -126,7 +284,11 @@ if (-not (Test-Path $warehousesFile)) {
     $dataLines = $lines | Select-Object -Skip 1 | Where-Object { $_.Trim() -ne "" }
     Write-Info "Found $($dataLines.Count) warehouses in CSV"
 
-    $existingCount = Invoke-SqlScalar -Query "SELECT COUNT(*) FROM Warehouses WHERE CompanyId = '$CompanyId'" -ConnStr $ConnectionString
+    # Warehouses are many-to-many with Companies (WarehouseCompanies join).
+    $existingCount = Invoke-SqlScalar -Query @"
+SELECT COUNT(*) FROM Warehouses w
+WHERE  EXISTS (SELECT 1 FROM WarehouseCompanies wc WHERE wc.WarehouseId = w.Id AND wc.CompanyId = '$CompanyId')
+"@ -ConnStr $ConnectionString
     if ($existingCount -gt 0) {
         Write-Warn "$existingCount warehouses already exist for this company. Skipping import (idempotent)."
     } else {
@@ -158,8 +320,9 @@ if (-not (Test-Path $warehousesFile)) {
             $zip           = ($fields[8]).Trim() -replace "'", "''"
 
             $sql = @"
-INSERT INTO Warehouses (Id, CompanyId, BusinessName, AlternateName, Address, City, State, Zip, LicenseNumber, LegacyLicenseNumber, IsActive, CreatedAt, UpdatedAt)
-VALUES ('$id', '$CompanyId', N'$businessName', N'$alternateName', N'$addressVal', N'$city', '$state', '$zip', '$license', '$legacyLicense', 1, '$now', '$now')
+INSERT INTO Warehouses (Id, BusinessName, AlternateName, Address, City, State, Zip, LicenseNumber, LegacyLicenseNumber, IsActive, CreatedAt, UpdatedAt)
+VALUES ('$id', N'$businessName', N'$alternateName', N'$addressVal', N'$city', '$state', '$zip', '$license', '$legacyLicense', 1, '$now', '$now');
+INSERT INTO WarehouseCompanies (WarehouseId, CompanyId) VALUES ('$id', '$CompanyId');
 "@
             try {
                 Invoke-Sql -Query $sql -ConnStr $ConnectionString | Out-Null
@@ -311,12 +474,27 @@ VALUES ('$id', '$CompanyId', N'$name', '$plate', $hubClause, 1, '$now', '$now')
 }
 
 Write-Header "Import complete"
-$storeCount = Invoke-SqlScalar -Query "SELECT COUNT(*) FROM Stores WHERE CompanyId = '$CompanyId'" -ConnStr $ConnectionString
-$whCount = Invoke-SqlScalar -Query "SELECT COUNT(*) FROM Warehouses WHERE CompanyId = '$CompanyId'" -ConnStr $ConnectionString
+$storeCount = Invoke-SqlScalar -Query @"
+SELECT COUNT(*) FROM Stores s
+WHERE EXISTS (SELECT 1 FROM StoreCompanies sc WHERE sc.StoreId = s.Id AND sc.CompanyId = '$CompanyId')
+"@ -ConnStr $ConnectionString
+$whCount = Invoke-SqlScalar -Query @"
+SELECT COUNT(*) FROM Warehouses w
+WHERE EXISTS (SELECT 1 FROM WarehouseCompanies wc WHERE wc.WarehouseId = w.Id AND wc.CompanyId = '$CompanyId')
+"@ -ConnStr $ConnectionString
 $hubCount = Invoke-SqlScalar -Query "SELECT COUNT(*) FROM Hubs WHERE CompanyId = '$CompanyId'" -ConnStr $ConnectionString
 $truckCount = Invoke-SqlScalar -Query "SELECT COUNT(*) FROM Trucks WHERE CompanyId = '$CompanyId'" -ConnStr $ConnectionString
-Write-Host "  Stores:     $storeCount"
-Write-Host "  Warehouses: $whCount"
-Write-Host "  Hubs:       $hubCount"
-Write-Host "  Vans:       $truckCount"
+$districtCount = Invoke-SqlScalar -Query "SELECT COUNT(*) FROM Districts WHERE CompanyId = '$CompanyId'" -ConnStr $ConnectionString
+$zoneCount     = Invoke-SqlScalar -Query "SELECT COUNT(*) FROM Zones WHERE CompanyId = '$CompanyId'" -ConnStr $ConnectionString
+$zonedStores   = Invoke-SqlScalar -Query @"
+SELECT COUNT(*) FROM Stores s
+WHERE s.ZoneId IS NOT NULL
+  AND EXISTS (SELECT 1 FROM StoreCompanies sc WHERE sc.StoreId = s.Id AND sc.CompanyId = '$CompanyId')
+"@ -ConnStr $ConnectionString
+Write-Host "  Stores:           $storeCount  ($zonedStores zoned)"
+Write-Host "  Warehouses:       $whCount"
+Write-Host "  Hubs:             $hubCount"
+Write-Host "  Vans:             $truckCount"
+Write-Host "  Districts:        $districtCount"
+Write-Host "  Zones:            $zoneCount"
 Write-Host ""

@@ -3,11 +3,11 @@
 # Atlas Deliver — Docker Deployment Script  (Windows PowerShell 7+)
 #
 # Usage:
-#   .\deploy.ps1              # full deploy
-#   .\deploy.ps1 -Build       # force rebuild all images
-#   .\deploy.ps1 -Down        # stop and remove all containers
-#   .\deploy.ps1 -Clean       # stop + remove containers + volumes
-#   .\deploy.ps1 -Logs        # tail logs after deploy
+#   .\deploy-docker.ps1              # full deploy
+#   .\deploy-docker.ps1 -Build       # force rebuild all images
+#   .\deploy-docker.ps1 -Down        # stop and remove all containers
+#   .\deploy-docker.ps1 -Clean       # stop + remove containers + volumes
+#   .\deploy-docker.ps1 -Logs        # tail logs after deploy
 # =============================================================
 
 [CmdletBinding()]
@@ -57,7 +57,7 @@ function Write-Err     { param($msg) Write-Host "[ERROR] $msg"  -ForegroundColor
 
 # ---- Help ---------------------------------------------------
 if ($Help) {
-    Write-Host "Usage: .\deploy.ps1 [-Build] [-Down] [-Clean] [-Logs]"
+    Write-Host "Usage: .\deploy-docker.ps1 [-Build] [-Down] [-Clean] [-Logs]"
     exit 0
 }
 
@@ -320,8 +320,8 @@ Write-Host ""
 Write-Host "  Useful commands:"
 Write-Host "    docker compose ps                   -> container status"
 Write-Host "    docker compose logs -f              -> tail all logs"
-Write-Host "    .\deploy.ps1 -Down                  -> stop everything"
-Write-Host "    .\deploy.ps1 -Clean                 -> stop + wipe volumes"
+Write-Host "    .\deploy-docker.ps1 -Down                  -> stop everything"
+Write-Host "    .\deploy-docker.ps1 -Clean                 -> stop + wipe volumes"
 Write-Host ""
 
 $deployStopwatch.Stop()
