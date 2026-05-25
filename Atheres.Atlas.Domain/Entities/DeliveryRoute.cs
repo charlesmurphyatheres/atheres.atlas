@@ -12,6 +12,24 @@ public class DeliveryRoute
     /// <summary>Warehouse where goods are picked up (null if all orders are already at hub).</summary>
     public Guid? WarehouseId { get; set; }
 
+    /// <summary>Classifies this route's role in the pickup → hub-sort → zone-delivery
+    /// pipeline. <see cref="RouteType.Legacy"/> is the default for pre-existing rows.</summary>
+    public RouteType RouteType { get; set; } = RouteType.Legacy;
+
+    /// <summary>For <see cref="RouteType.ZonedDelivery"/> and <see cref="RouteType.DirectDelivery"/>,
+    /// the single zone every stop on this route lives in. Null for pickup-only and legacy routes.</summary>
+    public Guid? ZoneId { get; set; }
+
+    /// <summary>Estimated wall-clock time the pickup van will arrive at the hub. Populated
+    /// when a Pickup route is created so paired ZonedDelivery routes can compute their
+    /// own start time (= HubArrivalTime + Hub.SortingWaitMinutes).</summary>
+    public DateTime? HubArrivalTime { get; set; }
+
+    /// <summary>For delivery routes that depart after a hub sort, the earliest moment
+    /// the delivery van may leave (= paired pickup's HubArrivalTime + sort wait). For
+    /// <see cref="RouteType.DirectDelivery"/> this equals the warehouse pickup time.</summary>
+    public DateTime? ScheduledDepartTime { get; set; }
+
     public DateTime DeliveryDate { get; set; }
 
     public string StartAddress { get; set; } = string.Empty;

@@ -97,7 +97,10 @@ public class OrderIngestionAgent
         }
 
         var warehouse = await _db.Warehouses.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(w => w.LicenseNumber == dto.WarehouseLicenseNumber && w.CompanyId == company.Id, ct);
+            .FirstOrDefaultAsync(
+                w => w.LicenseNumber == dto.WarehouseLicenseNumber
+                  && w.Companies.Any(c => c.Id == company.Id),
+                ct);
 
         if (warehouse is null)
         {
@@ -107,7 +110,10 @@ public class OrderIngestionAgent
         }
 
         var store = await _db.Stores.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(s => s.LicenseNumber == dto.StoreLicenseNumber && s.CompanyId == company.Id, ct);
+            .FirstOrDefaultAsync(
+                s => s.LicenseNumber == dto.StoreLicenseNumber
+                  && s.Companies.Any(c => c.Id == company.Id),
+                ct);
 
         if (store is null)
         {

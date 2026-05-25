@@ -335,9 +335,13 @@ public class BatchAgent
         if (company is null)
             return new NotFoundObjectResult(new { error = $"Company not found: {dto.CompanySlug}" });
 
-        // Look up warehouse by license number scoped to company
+        // Look up warehouse by license number scoped to company (many-to-many)
         var warehouse = await _db.Warehouses.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(w => w.LicenseNumber == dto.WarehouseLicenseNumber && w.CompanyId == company.Id && w.IsActive, ct);
+            .FirstOrDefaultAsync(
+                w => w.LicenseNumber == dto.WarehouseLicenseNumber
+                  && w.IsActive
+                  && w.Companies.Any(c => c.Id == company.Id),
+                ct);
 
         if (warehouse is null)
             return new NotFoundObjectResult(new { error = $"Warehouse not found: {dto.WarehouseLicenseNumber} for company {dto.CompanySlug}" });
@@ -383,7 +387,7 @@ public class BatchAgent
 
         // Get all active hubs with available trucks
         var hubs = await _db.Hubs.IgnoreQueryFilters()
-            .Where(h => h.CompanyId == warehouse.CompanyId && h.IsActive)
+            .Where(h => h.CompanyId == company.Id && h.IsActive)
             .ToListAsync(ct);
 
         if (hubs.Count == 0)
@@ -467,7 +471,7 @@ public class BatchAgent
 
             var batch = new OrderBatch
             {
-                CompanyId   = warehouse.CompanyId,
+                CompanyId   = company.Id,
                 Name        = $"{warehouse.BusinessName} → {hub.Name} - {dto.PickupDateTime:MMM dd HH:mm}",
                 HubId       = hubId,
                 WarehouseId = warehouse.Id,
@@ -492,7 +496,7 @@ public class BatchAgent
             var routeRequestId = Guid.NewGuid();
             await _bus.PublishAsync(ServiceBusQueues.RoutesOptimize,
                 new RouteOptimizationRequestMessage(
-                    routeRequestId, warehouse.CompanyId, truck?.Id, hubId, warehouse.Id,
+                    routeRequestId, company.Id, truck?.Id, hubId, warehouse.Id,
                     dto.PickupDateTime, orderIds, DateTime.UtcNow), ct);
 
             totalScheduled += orderIds.Count;
@@ -521,7 +525,7 @@ public class BatchAgent
 
         await _bus.PublishAsync(ServiceBusQueues.Audit, new AuditMessage(
             AuditEventType.BatchCreatedViaPickup, nameof(BatchAgent),
-            warehouse.CompanyId, null, null, null, null,
+            company.Id, null, null, null, null,
             $"ReadyToPickup: {orders.Count} orders for {warehouse.BusinessName} split across {batchResults.Count} hub(s)",
             true, null, DateTime.UtcNow), ct);
 

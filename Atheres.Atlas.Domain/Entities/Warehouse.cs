@@ -7,8 +7,7 @@ namespace Atheres.Atlas.Domain.Entities;
 /// </summary>
 public class Warehouse
 {
-    public Guid   Id        { get; set; } = Guid.NewGuid();
-    public Guid   CompanyId { get; set; }
+    public Guid Id { get; set; } = Guid.NewGuid();
 
     public string BusinessName       { get; set; } = string.Empty;
     public string? AlternateName     { get; set; }
@@ -22,6 +21,16 @@ public class Warehouse
     public double? Latitude  { get; set; }
     public double? Longitude { get; set; }
     public string? FormattedAddress { get; set; }
+
+    /// <summary>
+    /// Minutes a van spends at this warehouse for loading / paperwork
+    /// before it can depart for the hub or its first delivery. Applied
+    /// by both the Pickup round trip (between outbound and inbound
+    /// Google legs) and any DirectDelivery / Legacy with-warehouse route
+    /// (added to runningTime before the first delivery stop). Configurable
+    /// per warehouse because dock efficiency varies; default 15.
+    /// </summary>
+    public int LoadingWaitMinutes { get; set; } = 15;
 
     // Tentative weekly pickup schedule (nullable = no standing pickup that day)
     public TimeSpan? MondayPickupTime    { get; set; }
@@ -50,7 +59,9 @@ public class Warehouse
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation
-    public Company Company { get; set; } = null!;
+    /// <summary>Companies that pick up at this warehouse. Many-to-many so a
+    /// supplier location can be shared by carriers who deliver from it.</summary>
+    public ICollection<Company> Companies { get; set; } = [];
     public ICollection<Order> Orders { get; set; } = [];
 
     public string FullAddress => $"{Address}, {City}, {State} {Zip}";

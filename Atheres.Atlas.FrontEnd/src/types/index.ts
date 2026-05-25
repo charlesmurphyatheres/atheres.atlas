@@ -31,6 +31,7 @@ export type NotificationType =
 
 export interface Order {
   id: string
+  companyId?: string
   warehouseLicenseNumber?: string
   storeLicenseNumber?: string
   licenseNumber?: string
@@ -87,8 +88,25 @@ export interface WarehousePickup {
   estimatedArrival?: string
 }
 
+/** Classifies a route by its role in the pickup → hub-sort → zoned-delivery
+ *  pipeline. Mirrors RouteType.cs on the backend. */
+export type RouteTypeKind = 'Legacy' | 'Pickup' | 'ZonedDelivery' | 'DirectDelivery'
+
 export interface Route {
   id: string
+  companyId?: string
+  /** New-flow shape — what kind of van this route represents. Old rows
+   *  default to 'Legacy' and render with the original card layout. */
+  routeType?: RouteTypeKind
+  /** Single zone the route's stops belong to. Set for ZonedDelivery and
+   *  DirectDelivery; null for Pickup and Legacy. */
+  zoneId?: string | null
+  /** When the van leaves its start point. Pickup leaves the hub at the
+   *  delivery window start; ZonedDelivery leaves the hub after the paired
+   *  Pickup returns + the hub sort wait. */
+  scheduledDepartTime?: string | null
+  /** Pickup-only: when the van returns to the hub from the warehouse. */
+  hubArrivalTime?: string | null
   deliveryDate: string
   warehouseId?: string
   warehousePickup?: WarehousePickup
@@ -131,7 +149,10 @@ export interface UserRouteSettings {
 export const MAX_STOPS_HARD_CAP = 20
 
 /** Default UserRouteSettings.maxStopsPerRoute applied to new rows. */
-export const DEFAULT_MAX_STOPS = 12
+export const DEFAULT_MAX_STOPS = 5
+
+/** Default per-stop service minutes applied to new UserRouteSettings rows. */
+export const DEFAULT_WAIT_MINUTES_PER_STOP = 15
 
 export interface PagedResult<T> {
   items: T[]
@@ -194,12 +215,20 @@ export interface Hub {
   city: string
   state: string
   zip: string
+  /** Minutes pickup vans wait at the hub for orders to be sorted before
+   *  per-zone delivery vans dispatch. Editable per hub. */
+  sortingWaitMinutes: number
   isActive: boolean
 }
 
 export interface Warehouse {
   id: string
-  companyId: string
+  /** Companies this warehouse is shared with (many-to-many). */
+  companies?: { id: string; name: string }[]
+  /** Minutes a van spends at this warehouse loading. Applied to the
+   *  Pickup round trip and any DirectDelivery / Legacy route that
+   *  visits this warehouse. */
+  loadingWaitMinutes?: number
   businessName: string
   alternateName?: string
   address: string

@@ -20,6 +20,14 @@ public class Hub
     public double? Longitude { get; set; }
     public string? FormattedAddress { get; set; }
 
+    /// <summary>
+    /// Minutes that elapse between a pickup van's arrival at this hub and the
+    /// dispatch of the per-zone delivery vans. Models the time hub operators
+    /// need to break down a pickup load and stage it by zone. Configurable
+    /// per hub because larger / busier hubs sort more slowly. Default 30.
+    /// </summary>
+    public int SortingWaitMinutes { get; set; } = 30;
+
     public bool IsActive    { get; set; } = true;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;

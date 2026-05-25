@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { getSettings, saveSettings } from '../services/apiService'
-import { DEFAULT_MAX_STOPS, MAX_STOPS_HARD_CAP, type UserRouteSettings } from '../types'
+import { DEFAULT_MAX_STOPS, DEFAULT_WAIT_MINUTES_PER_STOP, MAX_STOPS_HARD_CAP, type UserRouteSettings } from '../types'
 
 // Start and end addresses are no longer configured here — every route
 // originates and terminates at the assigned truck's home hub (set per-van
@@ -12,7 +12,7 @@ export default function SettingsPanel() {
     deliveryWindowEnd: '17:00:00',
     confirmationDeadlineHours: 3,
     maxStopsPerRoute: DEFAULT_MAX_STOPS,
-    waitMinutesPerStop: 0,
+    waitMinutesPerStop: DEFAULT_WAIT_MINUTES_PER_STOP,
   })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)

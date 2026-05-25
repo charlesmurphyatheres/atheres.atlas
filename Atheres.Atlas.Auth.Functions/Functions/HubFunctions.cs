@@ -47,6 +47,7 @@ public class HubFunctions
             {
                 h.Id, h.CompanyId, h.Name,
                 h.Address, h.City, h.State, h.Zip,
+                h.SortingWaitMinutes,
                 h.IsActive,
             })
             .ToListAsync(ct);
@@ -84,6 +85,9 @@ public class HubFunctions
             City      = dto.City ?? string.Empty,
             State     = dto.State ?? string.Empty,
             Zip       = dto.Zip ?? string.Empty,
+            // SortingWaitMinutes defaults to 30 on the entity; allow create
+            // to override it when the operator already knows the hub's pace.
+            SortingWaitMinutes = ClampSortingWait(dto.SortingWaitMinutes ?? 30),
         };
 
         _db.Hubs.Add(hub);
@@ -128,6 +132,7 @@ public class HubFunctions
         if (dto?.State is not null)                    hub.State   = dto.State;
         if (dto?.Zip is not null)                      hub.Zip     = dto.Zip;
         if (dto?.IsActive is not null)                 hub.IsActive = dto.IsActive.Value;
+        if (dto?.SortingWaitMinutes is not null)       hub.SortingWaitMinutes = ClampSortingWait(dto.SortingWaitMinutes.Value);
 
         if (addressChanged)
         {
@@ -177,6 +182,12 @@ public class HubFunctions
 
     private static IActionResult Forbid() =>
         new ObjectResult(new { error = "Access denied." }) { StatusCode = 403 };
+
+    /// <summary>Constrains the sort-wait to a sensible range. 0 lets ops disable
+    /// the sort step entirely; 240 (4 hours) is an arbitrary upper bound that
+    /// keeps a fat-fingered value from making delivery routes vanish off the
+    /// schedule.</summary>
+    private static int ClampSortingWait(int minutes) => Math.Clamp(minutes, 0, 240);
 }
 
 public class CreateHubDto
@@ -187,6 +198,7 @@ public class CreateHubDto
     public string? City { get; set; }
     public string? State { get; set; }
     public string? Zip { get; set; }
+    public int? SortingWaitMinutes { get; set; }
 }
 
 public class UpdateHubDto
@@ -197,4 +209,5 @@ public class UpdateHubDto
     public string? State { get; set; }
     public string? Zip { get; set; }
     public bool? IsActive { get; set; }
+    public int? SortingWaitMinutes { get; set; }
 }

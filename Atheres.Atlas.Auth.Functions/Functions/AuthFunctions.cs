@@ -118,11 +118,14 @@ public class AuthFunctions
                 return new BadRequestObjectResult(new { error = "Order Importer accounts must be assigned to a warehouse." });
 
             var warehouse = await _db.Warehouses.IgnoreQueryFilters()
+                .Include(w => w.Companies)
                 .FirstOrDefaultAsync(w => w.Id == dto.WarehouseId.Value && w.IsActive);
             if (warehouse is null)
                 return new BadRequestObjectResult(new { error = "Selected warehouse not found or inactive." });
 
-            if (warehouse.CompanyId != targetCompanyId)
+            // Warehouses are many-to-many with Companies now; the importer
+            // can be pinned only if the target company is one of them.
+            if (!warehouse.Companies.Any(c => c.Id == targetCompanyId))
                 return new BadRequestObjectResult(new { error = "Selected warehouse does not belong to the target company." });
 
             assignedWarehouseId = warehouse.Id;

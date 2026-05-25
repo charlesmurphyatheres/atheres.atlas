@@ -6,8 +6,7 @@ namespace Atheres.Atlas.Domain.Entities;
 /// </summary>
 public class Store
 {
-    public Guid   Id        { get; set; } = Guid.NewGuid();
-    public Guid   CompanyId { get; set; }
+    public Guid Id { get; set; } = Guid.NewGuid();
 
     /// <summary>The warehouse/supplier this store is a customer of (e.g., "Echelon", "Six Labs").</summary>
     public string Customer       { get; set; } = string.Empty;
@@ -26,12 +25,20 @@ public class Store
     public double? Longitude { get; set; }
     public string? FormattedAddress { get; set; }
 
+    /// <summary>Optional delivery zone assignment. Linked at import time via
+    /// LicenseNumber → zones.csv. NULL when the store hasn't been mapped yet.</summary>
+    public Guid? ZoneId { get; set; }
+
     public bool IsActive    { get; set; } = true;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation
-    public Company Company { get; set; } = null!;
+    /// <summary>Companies that can dispatch to this store. A store may serve
+    /// more than one carrier — e.g. a dispensary that buys from suppliers
+    /// served by different delivery companies — so this is many-to-many.</summary>
+    public ICollection<Company> Companies { get; set; } = [];
+    public Zone?   Zone    { get; set; }
     public ICollection<Order> Orders { get; set; } = [];
 
     public string FullAddress => $"{Address}, {City}, {State} {Zip}";

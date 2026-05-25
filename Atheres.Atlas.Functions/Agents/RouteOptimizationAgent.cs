@@ -124,6 +124,18 @@ public class RouteOptimizationAgent
             }
         }
 
+        // ---- Pickup short-circuit -------------------------------------------
+        // A Pickup message represents the pickup van's warehouse → hub trip.
+        // It has order IDs attached (so we know what's on the truck) but no
+        // delivery stops materialise here — the actual deliveries are handled
+        // by the paired ZonedDelivery routes. Stamp HubArrivalTime so those
+        // paired routes can compute their ScheduledDepartTime later.
+        if (message.Kind == RouteType.Pickup)
+        {
+            await BuildPickupRouteAsync(message, hub, warehouse, deliveryWindowStart, ct);
+            return;
+        }
+
         // Load all orders. Stale rows (more than a day old) get flipped to
         // RouteOmitted right here as a backstop — every trigger endpoint
         // already filters them out, but messages can sit on the queue long
@@ -203,20 +215,24 @@ public class RouteOptimizationAgent
                 warehouse.Latitude, warehouse.Longitude,
                 warehouse.FormattedAddress ?? warehouse.FullAddress);
 
-            // Pre-pickup leg: a simple A→B drive with no waypoints. The
-            // driver hasn't started delivering yet; this is the trip from
-            // depot to the supplier where products are loaded.
-            pickupLeg = await _maps.GetOptimizedRouteAsync(hubPoint, warehousePoint, Array.Empty<string>(), ct);
-            if (pickupLeg is null)
+            // DirectDelivery skips the Hub→Warehouse pickup leg — the van
+            // starts at the warehouse (already loaded by the morning
+            // pickup) and goes straight to its zoned stops. Legacy keeps
+            // the old "depot to supplier then deliveries" shape.
+            if (message.Kind != RouteType.DirectDelivery)
             {
-                _logger.LogError("Hub→Warehouse leg failed for {RouteRequestId}", message.RouteRequestId);
-                await SafePublish(() => _bus.PublishAsync(ServiceBusQueues.Audit, new AuditMessage(
-                    AuditEventType.RouteOptimizationFailed, nameof(RouteOptimizationAgent),
-                    message.CompanyId, null, message.RouteRequestId,
-                    null, null, "Google Maps API returned no hub→warehouse route", false,
-                    "No pickup leg", DateTime.UtcNow), ct),
-                    "failure audit event");
-                return;
+                pickupLeg = await _maps.GetOptimizedRouteAsync(hubPoint, warehousePoint, Array.Empty<string>(), ct);
+                if (pickupLeg is null)
+                {
+                    _logger.LogError("Hub→Warehouse leg failed for {RouteRequestId}", message.RouteRequestId);
+                    await SafePublish(() => _bus.PublishAsync(ServiceBusQueues.Audit, new AuditMessage(
+                        AuditEventType.RouteOptimizationFailed, nameof(RouteOptimizationAgent),
+                        message.CompanyId, null, message.RouteRequestId,
+                        null, null, "Google Maps API returned no hub→warehouse route", false,
+                        "No pickup leg", DateTime.UtcNow), ct),
+                        "failure audit event");
+                    return;
+                }
             }
 
             // Delivery loop: warehouse is the origin, hub is the destination,
@@ -260,16 +276,46 @@ public class RouteOptimizationAgent
         // not just the optimized loop.
         var pickupDistance = pickupLeg?.TotalDistanceMeters  ?? 0;
         var pickupDuration = pickupLeg?.TotalDurationSeconds ?? 0;
+
+        // Warehouse loading wait — applies whenever the route visits a
+        // warehouse, i.e. Legacy with-warehouse (hub→warehouse→stops) AND
+        // DirectDelivery (warehouse→stops). For ZonedDelivery the
+        // warehouse is null and the wait is 0. Folded into totalDuration
+        // so the route's "driver day" matches reality, and into
+        // runningTime so per-stop ETAs reflect the loading dock time.
+        var warehouseWaitSeconds = (warehouse?.LoadingWaitMinutes ?? 0) * 60;
+
         var totalDistance  = pickupDistance + deliveryLoop.TotalDistanceMeters;
-        var totalDuration  = pickupDuration + deliveryLoop.TotalDurationSeconds;
+        var totalDuration  = pickupDuration + warehouseWaitSeconds + deliveryLoop.TotalDurationSeconds;
 
         // Build delivery times starting from window start. The hub→warehouse
-        // drive eats into the window before the first delivery is even
-        // attempted, so include its duration in the running clock.
+        // drive (Legacy) and the warehouse loading wait both eat into the
+        // window before the first delivery is even attempted, so include
+        // both in the running clock.
         var deliveryStart = message.DeliveryDate.Date.Add(deliveryWindowStart);
-        var runningTime   = deliveryStart.AddSeconds(pickupDuration);
+        var runningTime   = deliveryStart.AddSeconds(pickupDuration + warehouseWaitSeconds);
 
-        // Create the route entity (hub is always start and end)
+        // Start point depends on RouteType. DirectDelivery begins at the
+        // warehouse (no hub touch beforehand). Everything else starts at
+        // the hub.
+        var startIsWarehouse = message.Kind == RouteType.DirectDelivery && warehouse is not null;
+
+        // ScheduledDepartTime: prefer the scheduler's pre-computed value
+        // (which chains ZonedDelivery off the paired Pickup van's
+        // Haversine-estimated return + sort wait, so delivery vans
+        // actually wait for the pickup van to return). Fall back to a
+        // direct computation if the scheduler didn't stamp one — this
+        // keeps backwards compat for any legacy callers that don't yet
+        // pass ScheduledDepartTime on the message.
+        DateTime? scheduledDepart = message.ScheduledDepartTime;
+        if (scheduledDepart is null)
+        {
+            if (message.Kind == RouteType.ZonedDelivery)
+                scheduledDepart = deliveryStart.AddMinutes(hub.SortingWaitMinutes);
+            else if (message.Kind == RouteType.DirectDelivery)
+                scheduledDepart = deliveryStart;
+        }
+
         var route = new DeliveryRoute
         {
             Id = message.RouteRequestId,
@@ -277,13 +323,18 @@ public class RouteOptimizationAgent
             TruckId = message.TruckId,
             HubId = effectiveHubId,
             WarehouseId = message.WarehouseId,
+            RouteType = message.Kind,
+            ZoneId = message.ZoneId,
+            ScheduledDepartTime = scheduledDepart,
             DeliveryDate = message.DeliveryDate,
             // StartAddress / EndAddress are the human-readable fall-back —
             // always store the formatted/full address for display, not the
             // "lat,lng" string we passed to Directions.
-            StartAddress = hub.FormattedAddress ?? hub.FullAddress,
-            StartLatitude = hub.Latitude ?? 0,
-            StartLongitude = hub.Longitude ?? 0,
+            StartAddress  = startIsWarehouse
+                ? warehouse!.FormattedAddress ?? warehouse.FullAddress
+                : hub.FormattedAddress ?? hub.FullAddress,
+            StartLatitude  = startIsWarehouse ? (warehouse!.Latitude  ?? 0) : (hub.Latitude  ?? 0),
+            StartLongitude = startIsWarehouse ? (warehouse!.Longitude ?? 0) : (hub.Longitude ?? 0),
             EndAddress = hub.FormattedAddress ?? hub.FullAddress,
             EndLatitude = hub.Latitude ?? 0,
             EndLongitude = hub.Longitude ?? 0,
@@ -452,6 +503,104 @@ public class RouteOptimizationAgent
         lat.HasValue && lng.HasValue
             ? FormattableString.Invariant($"{lat.Value:F6},{lng.Value:F6}")
             : fallbackAddress;
+
+    /// <summary>
+    /// Builds + persists a <see cref="RouteType.Pickup"/> route as a
+    /// Hub → Warehouse → Hub round trip. The driver starts the day at
+    /// the hub (their home base), drives to the warehouse to load, then
+    /// returns to the hub for the sort. HubArrivalTime is stamped from
+    /// the start time + total Google leg duration so paired ZonedDelivery
+    /// routes know when their sort wait actually begins from Google's
+    /// real numbers (the scheduler's Haversine estimate is a fallback).
+    /// The order IDs on the message are the truck's cargo manifest — no
+    /// RouteStops materialise here and no order Status changes; that's
+    /// owned by the paired ZonedDelivery routes.
+    /// </summary>
+    private async Task BuildPickupRouteAsync(
+        RouteOptimizationRequestMessage message,
+        Hub hub,
+        Warehouse? warehouse,
+        TimeSpan deliveryWindowStart,
+        CancellationToken ct)
+    {
+        if (warehouse is null)
+        {
+            _logger.LogError(
+                "Pickup route {RouteRequestId} has no WarehouseId — cannot compute warehouse→hub leg.",
+                message.RouteRequestId);
+            return;
+        }
+
+        var warehousePoint = BuildRoutePoint(
+            warehouse.Latitude, warehouse.Longitude,
+            warehouse.FormattedAddress ?? warehouse.FullAddress);
+        var hubPoint = BuildRoutePoint(hub.Latitude, hub.Longitude, hub.FormattedAddress ?? hub.FullAddress);
+
+        // Two-leg round trip. Issuing both legs through Directions gives us
+        // accurate per-leg durations; concatenating the polylines via
+        // PolylineCodec lets the map draw the full out-and-back trip in
+        // one continuous line.
+        var outbound = await _maps.GetOptimizedRouteAsync(hubPoint, warehousePoint, Array.Empty<string>(), ct);
+        if (outbound is null)
+        {
+            _logger.LogError("Pickup outbound leg failed for {RouteRequestId} (hub {HubId} → warehouse {WarehouseId})",
+                message.RouteRequestId, hub.Id, warehouse.Id);
+            return;
+        }
+        var inbound = await _maps.GetOptimizedRouteAsync(warehousePoint, hubPoint, Array.Empty<string>(), ct);
+        if (inbound is null)
+        {
+            _logger.LogError("Pickup inbound leg failed for {RouteRequestId} (warehouse {WarehouseId} → hub {HubId})",
+                message.RouteRequestId, warehouse.Id, hub.Id);
+            return;
+        }
+
+        // Loading wait — minutes the van sits at the warehouse loading
+        // before turning around. Persisted on the route's TotalDuration
+        // so the driver's day reflects the real elapsed time, not just
+        // driving. Pulled from the warehouse row (default 15).
+        var warehouseWaitSeconds = warehouse.LoadingWaitMinutes * 60;
+        var totalDistance  = outbound.TotalDistanceMeters  + inbound.TotalDistanceMeters;
+        var totalDuration  = outbound.TotalDurationSeconds + warehouseWaitSeconds + inbound.TotalDurationSeconds;
+        var deliveryStart  = message.ScheduledDepartTime
+                             ?? message.DeliveryDate.Date.Add(deliveryWindowStart);
+        var hubArrival     = deliveryStart.AddSeconds(totalDuration);
+
+        var route = new DeliveryRoute
+        {
+            Id           = message.RouteRequestId,
+            CompanyId    = message.CompanyId,
+            TruckId      = message.TruckId,
+            HubId        = hub.Id,
+            WarehouseId  = warehouse.Id,
+            RouteType    = RouteType.Pickup,
+            ScheduledDepartTime = deliveryStart,
+            DeliveryDate = message.DeliveryDate,
+            // Pickup starts AND ends at the hub.
+            StartAddress    = hub.FormattedAddress ?? hub.FullAddress,
+            StartLatitude   = hub.Latitude  ?? 0,
+            StartLongitude  = hub.Longitude ?? 0,
+            EndAddress      = hub.FormattedAddress ?? hub.FullAddress,
+            EndLatitude     = hub.Latitude  ?? 0,
+            EndLongitude    = hub.Longitude ?? 0,
+            TotalDistanceMeters  = totalDistance,
+            TotalDurationSeconds = totalDuration,
+            TotalStops           = 0,
+            HubArrivalTime       = hubArrival,
+            IsOptimized          = true,
+            // Stitch the outbound + inbound polylines into one continuous
+            // path. PolylineCodec.Concat dedupes the joint waypoint (the
+            // warehouse) so the line doesn't double up on the loading dock.
+            OverviewPolyline     = PolylineCodec.Concat(outbound.OverviewPolyline, inbound.OverviewPolyline),
+        };
+
+        await _routes.AddAsync(route, ct);
+        await _routes.SaveChangesAsync(ct);
+
+        _logger.LogInformation(
+            "Pickup route {RouteRequestId}: {HubName} → {WarehouseName} → {HubName}, return ~{Arrival:HH:mm}",
+            message.RouteRequestId, hub.Name, warehouse.BusinessName, hub.Name, hubArrival);
+    }
 
     /// <summary>
     /// Geocodes a Hub through Google Maps if it has no coordinates and

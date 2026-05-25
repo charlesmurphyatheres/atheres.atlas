@@ -33,7 +33,7 @@ Atheres.Atlas.FrontEnd/dist/
 *.md
 *.txt
 deploy.sh
-deploy.ps1
+deploy-docker.ps1
 docker-compose*.yml
 docker/
 

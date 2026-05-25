@@ -40,18 +40,23 @@ public class WarehouseFunctions
     {
         var companyId = GetCallerCompanyId(req);
 
-        var query = _db.Warehouses.Where(w => w.IsActive);
+        // SuperAdmin sees every active warehouse across tenants; everyone else
+        // sees only the ones whose join-table row matches their claim. Same
+        // guarantee as before, expressed through the many-to-many.
+        var query = _db.Warehouses.IgnoreQueryFilters().Where(w => w.IsActive);
         if (!req.HttpContext.User.IsInRole(Roles.SuperAdmin) && companyId.HasValue)
-            query = query.Where(w => w.CompanyId == companyId.Value);
+            query = query.Where(w => w.Companies.Any(c => c.Id == companyId.Value));
 
         var warehouses = await query
             .OrderBy(w => w.BusinessName)
             .Select(w => new
             {
-                w.Id, w.CompanyId,
+                w.Id,
+                companies = w.Companies.Select(c => new { id = c.Id, name = c.Name }),
                 w.BusinessName, w.AlternateName,
                 w.Address, w.City, w.State, w.Zip,
                 w.LicenseNumber, w.LegacyLicenseNumber,
+                w.LoadingWaitMinutes,
                 w.IsActive,
                 mondayPickupTime    = w.MondayPickupTime.HasValue    ? w.MondayPickupTime.Value.ToString(@"hh\:mm")    : null,
                 tuesdayPickupTime   = w.TuesdayPickupTime.HasValue   ? w.TuesdayPickupTime.Value.ToString(@"hh\:mm")   : null,
@@ -92,9 +97,15 @@ public class WarehouseFunctions
         if (!req.HttpContext.User.IsInRole(Roles.SuperAdmin) && targetCompanyId != companyId)
             return Forbid();
 
+        // Multi-tenant: a new warehouse starts linked to the target company.
+        // Additional companies can be attached later through a future
+        // sharing endpoint; for now Create only adds the single membership.
+        var targetCompany = await _db.Companies.FindAsync([targetCompanyId], ct);
+        if (targetCompany is null)
+            return new BadRequestObjectResult(new { error = "Target company not found." });
+
         var warehouse = new Warehouse
         {
-            CompanyId            = targetCompanyId,
             BusinessName         = dto.BusinessName,
             AlternateName        = dto.AlternateName,
             Address              = dto.Address,
@@ -103,13 +114,18 @@ public class WarehouseFunctions
             Zip                  = dto.Zip ?? string.Empty,
             LicenseNumber        = dto.LicenseNumber,
             LegacyLicenseNumber  = dto.LegacyLicenseNumber,
+            // Loading wait — clamped to the same 0–240 range used by
+            // Hub.SortingWaitMinutes so a fat-finger value can't push
+            // delivery routes hours out.
+            LoadingWaitMinutes   = ClampLoadingWait(dto.LoadingWaitMinutes ?? 15),
         };
+        warehouse.Companies.Add(targetCompany);
 
         _db.Warehouses.Add(warehouse);
         await _db.SaveChangesAsync(ct);
 
         _log.LogInformation("Warehouse created: {Name} ({Id}) for company {Company}",
-            warehouse.BusinessName, warehouse.Id, warehouse.CompanyId);
+            warehouse.BusinessName, warehouse.Id, targetCompanyId);
 
         return new ObjectResult(new { id = warehouse.Id, businessName = warehouse.BusinessName }) { StatusCode = 201 };
     }
@@ -123,10 +139,12 @@ public class WarehouseFunctions
         [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "warehouses/{id:guid}")]
         HttpRequest req, Guid id, CancellationToken ct)
     {
-        var warehouse = await _db.Warehouses.FindAsync([id], ct);
+        var warehouse = await _db.Warehouses.IgnoreQueryFilters()
+            .Include(w => w.Companies)
+            .FirstOrDefaultAsync(w => w.Id == id, ct);
         if (warehouse is null) return new NotFoundObjectResult(new { error = "Warehouse not found." });
 
-        if (!CanAccess(req, warehouse.CompanyId))
+        if (!CanAccess(req, warehouse.Companies.Select(c => c.Id)))
             return Forbid();
 
         UpdateWarehouseDto? dto;
@@ -151,6 +169,7 @@ public class WarehouseFunctions
         if (dto?.LicenseNumber is not null)                 warehouse.LicenseNumber = dto.LicenseNumber;
         if (dto?.LegacyLicenseNumber is not null)           warehouse.LegacyLicenseNumber = dto.LegacyLicenseNumber;
         if (dto?.IsActive is not null)                      warehouse.IsActive      = dto.IsActive.Value;
+        if (dto?.LoadingWaitMinutes is not null)            warehouse.LoadingWaitMinutes = ClampLoadingWait(dto.LoadingWaitMinutes.Value);
 
         if (addressChanged)
         {
@@ -183,10 +202,12 @@ public class WarehouseFunctions
         [HttpTrigger(AuthorizationLevel.Anonymous, "delete", Route = "warehouses/{id:guid}")]
         HttpRequest req, Guid id, CancellationToken ct)
     {
-        var warehouse = await _db.Warehouses.FindAsync([id], ct);
+        var warehouse = await _db.Warehouses.IgnoreQueryFilters()
+            .Include(w => w.Companies)
+            .FirstOrDefaultAsync(w => w.Id == id, ct);
         if (warehouse is null) return new NotFoundObjectResult(new { error = "Warehouse not found." });
 
-        if (!CanAccess(req, warehouse.CompanyId))
+        if (!CanAccess(req, warehouse.Companies.Select(c => c.Id)))
             return Forbid();
 
         warehouse.IsActive  = false;
@@ -198,11 +219,13 @@ public class WarehouseFunctions
     }
 
     // -----------------------------------------------------------------------
-    private bool CanAccess(HttpRequest req, Guid companyId)
+    /// <summary>SuperAdmin can touch any warehouse. Company Admin can touch a
+    /// warehouse only if their company is in the warehouse's company list.</summary>
+    private bool CanAccess(HttpRequest req, IEnumerable<Guid> warehouseCompanyIds)
     {
         if (req.HttpContext.User.IsInRole(Roles.SuperAdmin)) return true;
         var claim = req.HttpContext.User.FindFirst("companyId")?.Value;
-        return Guid.TryParse(claim, out var id) && id == companyId;
+        return Guid.TryParse(claim, out var id) && warehouseCompanyIds.Contains(id);
     }
 
     private static Guid? GetCallerCompanyId(HttpRequest req)
@@ -218,6 +241,12 @@ public class WarehouseFunctions
     private static TimeSpan? ParseTime(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null :
         TimeSpan.TryParse(value, out var t) ? t : null;
+
+    /// <summary>Constrains the loading wait to a sensible range — 0 lets
+    /// ops disable the wait entirely; 240 (4h) is an arbitrary upper bound
+    /// that prevents a typo from making delivery routes invisible on the
+    /// schedule. Mirrors the clamp on Hub.SortingWaitMinutes.</summary>
+    private static int ClampLoadingWait(int minutes) => Math.Clamp(minutes, 0, 240);
 }
 
 // ---- DTOs ----
@@ -233,6 +262,7 @@ public class CreateWarehouseDto
     public string? Zip { get; set; }
     public string? LicenseNumber { get; set; }
     public string? LegacyLicenseNumber { get; set; }
+    public int? LoadingWaitMinutes { get; set; }
 }
 
 public class UpdateWarehouseDto
@@ -246,6 +276,7 @@ public class UpdateWarehouseDto
     public string? LicenseNumber { get; set; }
     public string? LegacyLicenseNumber { get; set; }
     public bool? IsActive { get; set; }
+    public int? LoadingWaitMinutes { get; set; }
     // Weekly pickup schedule ("HH:mm" or "" to clear)
     public string? MondayPickupTime { get; set; }
     public string? TuesdayPickupTime { get; set; }

@@ -37,5 +37,7 @@ public interface IRouteScheduler
     Task<RouteEnqueueResult> EnqueueAsync(
         IReadOnlyCollection<Order> orders,
         Guid companyId,
-        CancellationToken ct = default);
+        CancellationToken ct = default,
+        string? triggeredBy = null,
+        string? trigger     = null);
 }

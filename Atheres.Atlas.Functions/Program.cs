@@ -79,6 +79,10 @@ var host = new HostBuilder()
         // each fanning out per-order optimization requests.
         services.AddScoped<IRouteScheduler, RouteScheduler>();
 
+        // Server-side PDF generation (iText). Stateless — singleton is
+        // fine and avoids per-request allocation of the document builder.
+        services.AddSingleton<PdfService>();
+
         // ---- Azure Service Bus ---------------------------------------------
         var serviceBusConnection = Environment.GetEnvironmentVariable("ServiceBusConnection")
             ?? throw new InvalidOperationException("ServiceBusConnection is required.");

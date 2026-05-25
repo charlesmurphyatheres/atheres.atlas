@@ -245,6 +245,37 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Ok "Migrations applied."
 
+# ---- Nuke order + route data ------------------------------------------------
+# Every deploy starts with zero orders, routes, batches, and confirmations so
+# iterative end-to-end testing (CSV import → schedule → optimize) doesn't
+# accumulate carry-over rows between runs. Master data (stores, warehouses,
+# hubs, trucks, districts, zones, users) is preserved — only the
+# transactional shell is wiped (see scripts/sql/nuke-route-data.sql).
+Write-Header "Nuking order + route data"
+$nukeSqlPath = Join-Path $PSScriptRoot "sql/nuke-route-data.sql"
+if (Test-Path $nukeSqlPath) {
+    $saPassword = [System.Environment]::GetEnvironmentVariable("MSSQL_SA_PASSWORD")
+    $dockerConnStr = "Server=localhost;Database=AtheresAtlas;User Id=sa;Password=$saPassword;TrustServerCertificate=True;"
+    Add-Type -AssemblyName System.Data -ErrorAction SilentlyContinue
+    $nukeConn = New-Object System.Data.SqlClient.SqlConnection $dockerConnStr
+    try {
+        $nukeConn.Open()
+        $nukeCmd = $nukeConn.CreateCommand()
+        $nukeCmd.CommandText    = Get-Content $nukeSqlPath -Raw
+        $nukeCmd.CommandTimeout = 60
+        $nukeCmd.ExecuteNonQuery() | Out-Null
+        Write-Ok "Order + route data wiped (Orders, Routes, RouteStops, OrderBatches, Confirmations)."
+    }
+    catch {
+        Write-Warn "Order + route data wipe failed: $($_.Exception.Message)"
+    }
+    finally {
+        $nukeConn.Close()
+    }
+} else {
+    Write-Warn "nuke-route-data.sql not found at $nukeSqlPath — skipping wipe."
+}
+
 # ---- Import reference data (stores + warehouses) ---------------
 Write-Header "Importing reference data"
 $importScript = Join-Path $PSScriptRoot "import-data.ps1"

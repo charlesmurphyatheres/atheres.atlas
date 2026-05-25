@@ -32,17 +32,11 @@ public class CompanyConfiguration : IEntityTypeConfiguration<Company>
             .HasForeignKey(h => h.CompanyId)
             .OnDelete(DeleteBehavior.Cascade);
 
-        // Stores
-        builder.HasMany(c => c.Stores)
-            .WithOne(s => s.Company)
-            .HasForeignKey(s => s.CompanyId)
-            .OnDelete(DeleteBehavior.Cascade);
-
-        // Warehouses
-        builder.HasMany(c => c.Warehouses)
-            .WithOne(w => w.Company)
-            .HasForeignKey(w => w.CompanyId)
-            .OnDelete(DeleteBehavior.Cascade);
+        // Stores and Warehouses are many-to-many — the relationship is
+        // configured from the dependent side in StoreConfiguration and
+        // WarehouseConfiguration (UsingEntity<Dictionary<...>>(...)), so we
+        // don't restate it here. Listing the inverse `c.Stores` and
+        // `c.Warehouses` collections on Company is enough.
 
         // Batches
         builder.HasMany(c => c.Batches)

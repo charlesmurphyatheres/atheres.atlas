@@ -103,7 +103,11 @@ public class OrderImportAgent
                 return new BadRequestObjectResult(new { error = "Order Importer account is missing a warehouse assignment." });
 
             var warehouseExists = await _db.Warehouses.IgnoreQueryFilters()
-                .AnyAsync(w => w.Id == warehouseId && w.CompanyId == company.Id && w.IsActive, ct);
+                .AnyAsync(
+                    w => w.Id == warehouseId
+                      && w.IsActive
+                      && w.Companies.Any(c => c.Id == company.Id),
+                    ct);
             if (!warehouseExists)
                 return new BadRequestObjectResult(new { error = "Assigned warehouse not found or inactive." });
 
@@ -124,8 +128,26 @@ public class OrderImportAgent
             .ToList();
 
         var storesById = await _db.Stores.IgnoreQueryFilters()
-            .Where(s => s.CompanyId == company.Id && storeIds.Contains(s.Id))
+            .Where(s => storeIds.Contains(s.Id) && s.Companies.Any(c => c.Id == company.Id))
             .ToDictionaryAsync(s => s.Id, ct);
+
+        // Pre-load every warehouse the import could possibly reference,
+        // restricted to the caller's company via the many-to-many join.
+        // Each row's WarehouseId overrides defaultWarehouseId (if any);
+        // requests from non-importer callers must specify it per row.
+        var warehouseIds = dto.Rows
+            .Where(r => r.WarehouseId.HasValue)
+            .Select(r => r.WarehouseId!.Value)
+            .Distinct()
+            .ToList();
+
+        var warehousesById = warehouseIds.Count == 0
+            ? new Dictionary<Guid, Warehouse>()
+            : await _db.Warehouses.IgnoreQueryFilters()
+                .Where(w => warehouseIds.Contains(w.Id)
+                         && w.IsActive
+                         && w.Companies.Any(c => c.Id == company.Id))
+                .ToDictionaryAsync(w => w.Id, ct);
 
         // Pre-fetch every sales-order number that already exists for this
         // company so we can reject duplicates before issuing INSERTs. Same
@@ -178,6 +200,39 @@ public class OrderImportAgent
                 continue;
             }
 
+            // Resolve the pickup warehouse for this row: row.WarehouseId wins
+            // if present and valid; otherwise fall back to the importer's
+            // pinned warehouse. Without a warehouse the order has no pickup
+            // leg, which is precisely the bug that motivated this column.
+            Guid? rowWarehouseId;
+            if (row.WarehouseId.HasValue)
+            {
+                if (!warehousesById.ContainsKey(row.WarehouseId.Value))
+                {
+                    errors.Add(new ImportRowError(i, "Warehouse not found or not accessible by this company."));
+                    continue;
+                }
+                // Defense in depth: an OrderImporter shouldn't be able to
+                // drop orders into a warehouse other than their pinned one
+                // by forging the request. defaultWarehouseId is the pinned
+                // warehouse extracted from the JWT claim above.
+                if (isOrderImporter && row.WarehouseId.Value != defaultWarehouseId)
+                {
+                    errors.Add(new ImportRowError(i, "Order Importer can only import orders pinned to their assigned warehouse."));
+                    continue;
+                }
+                rowWarehouseId = row.WarehouseId;
+            }
+            else if (defaultWarehouseId.HasValue)
+            {
+                rowWarehouseId = defaultWarehouseId;
+            }
+            else
+            {
+                errors.Add(new ImportRowError(i, "Row has no Warehouse License #. Map a Warehouse License # column or sign in as an Order Importer for a specific warehouse."));
+                continue;
+            }
+
             var salesOrder = NullIfBlank(row.SalesOrderNumber);
             if (salesOrder is not null)
             {
@@ -201,7 +256,7 @@ public class OrderImportAgent
             var order = new Order
             {
                 CompanyId           = company.Id,
-                WarehouseId         = defaultWarehouseId,
+                WarehouseId         = rowWarehouseId,
                 StoreId             = matchedStore.Id,
                 StoreLicenseNumber  = matchedStore.LicenseNumber,
                 StoreName           = matchedStore.Name,
@@ -259,7 +314,12 @@ public class OrderImportAgent
         {
             try
             {
-                var outcome = await _scheduler.EnqueueAsync(freshlyScheduled, company.Id, ct);
+                var triggeredBy = req.HttpContext.User?.Identity?.Name
+                                  ?? req.HttpContext.User?.FindFirst("email")?.Value;
+                var outcome = await _scheduler.EnqueueAsync(
+                    freshlyScheduled, company.Id, ct,
+                    triggeredBy: triggeredBy,
+                    trigger:     "CSV import (initialStatus=Scheduled)");
                 routesQueued       = outcome.RoutesQueued;
                 ordersUngeocoded   = outcome.OrdersUngeocoded;
                 noActiveHub        = outcome.NoActiveHub;
@@ -369,6 +429,13 @@ public class ImportedOrderRow
     /// frontend's preview grid (license-number match or inline create);
     /// re-validated server-side against the caller's company.</summary>
     public Guid? StoreId { get; set; }
+    /// <summary>Pickup warehouse for this order, resolved by the frontend
+    /// from the row's Warehouse License # column. Optional in the payload
+    /// because OrderImporter accounts fall back to their JWT-pinned
+    /// warehouse server-side; required (effectively) for Admin/SuperAdmin
+    /// imports since they have no default. Re-validated against the
+    /// caller's company.</summary>
+    public Guid? WarehouseId { get; set; }
     public string? OrderDate { get; set; }
     public string? Customer { get; set; }
     public string? SalesOrderNumber { get; set; }

@@ -114,17 +114,19 @@ export default function LiveRouteTracker() {
     }).filter(Boolean)
   }, [routes, now, isToday, liveMode])
 
-  // Fit bounds to all stops
+  const visibleRoutes = selectedRoute ? routes.filter((r) => r.id === selectedRoute) : routes
+
+  // Fit bounds to whatever the sidebar currently filters to, not the full
+  // route set — clicking a route in the sidebar should re-zoom the map to
+  // that route. Re-runs on selectedRoute change as well as data changes.
   const onMapLoad = useCallback((map: google.maps.Map) => {
     mapRef.current = map
-    fitBounds(map, routes)
-  }, [routes])
+    fitBounds(map, visibleRoutes)
+  }, [visibleRoutes])
 
   useEffect(() => {
-    if (mapRef.current && routes.length > 0) fitBounds(mapRef.current, routes)
-  }, [routes])
-
-  const visibleRoutes = selectedRoute ? routes.filter((r) => r.id === selectedRoute) : routes
+    if (mapRef.current && visibleRoutes.length > 0) fitBounds(mapRef.current, visibleRoutes)
+  }, [visibleRoutes])
 
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)]">
@@ -369,19 +371,29 @@ export default function LiveRouteTracker() {
 function fitBounds(map: google.maps.Map, routes: Route[]) {
   const bounds = new google.maps.LatLngBounds()
   let hasPoints = false
+
+  // Defensive: an un-geocoded entity persists as (0, 0) — extending the
+  // bounds with that point either drags the camera to the Atlantic or, if
+  // ALL points are 0/0, collapses the bounds so fitBounds silently no-ops
+  // and the map stays at its initial Illinois centroid. Treat exactly
+  // 0/0 as "no real coord" everywhere.
+  const isReal = (lat: number | null | undefined, lng: number | null | undefined): boolean =>
+    lat != null && lng != null && !(lat === 0 && lng === 0)
+
   for (const route of routes) {
     // Include the hub itself so its marker is always visible — otherwise
     // a route whose deliveries cluster far from the depot can leave the
     // hub off-screen at the initial zoom.
-    if (route.startLatitude && route.startLongitude) {
+    if (isReal(route.startLatitude, route.startLongitude)) {
       bounds.extend({ lat: route.startLatitude, lng: route.startLongitude })
       hasPoints = true
     }
-    if (route.warehousePickup?.latitude != null && route.warehousePickup?.longitude != null) {
-      bounds.extend({ lat: route.warehousePickup.latitude, lng: route.warehousePickup.longitude })
+    if (isReal(route.warehousePickup?.latitude, route.warehousePickup?.longitude)) {
+      bounds.extend({ lat: route.warehousePickup!.latitude!, lng: route.warehousePickup!.longitude! })
       hasPoints = true
     }
     for (const stop of route.stops) {
+      if (!isReal(stop.latitude, stop.longitude)) continue
       bounds.extend({ lat: stop.latitude, lng: stop.longitude })
       hasPoints = true
     }

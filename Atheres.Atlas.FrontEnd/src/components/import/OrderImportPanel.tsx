@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAuth } from '../../contexts/AuthContext'
+import { useCompanyContext } from '../../contexts/CompanyContext'
 import {
   createStore,
   getStores,
+  getWarehouses,
   importOrders,
   type CreateStorePayload,
   type ImportInitialStatus,
@@ -10,6 +12,7 @@ import {
   type ImportedOrderRow,
   type StoreLite,
 } from '../../services/apiService'
+import type { Warehouse } from '../../types'
 import { parseCsv } from './csvParser'
 
 // ---- Field model -----------------------------------------------------------
@@ -28,6 +31,7 @@ type FieldKey =
   | 'storeName'
   | 'purchaseOrderNumber'
   | 'licenseNumber'
+  | 'warehouseLicenseNumber'
 
 interface FieldDef {
   key: FieldKey
@@ -39,13 +43,18 @@ interface FieldDef {
   hints: string[]
 }
 
+// Order matters: autoMap iterates this list top-down and takes the first
+// hit per header. Put the more specific keys before broader ones so e.g.
+// a header "Warehouse License #" maps to warehouseLicenseNumber, not the
+// generic licenseNumber.
 const FIELDS: FieldDef[] = [
-  { key: 'orderDate',           label: 'Order Date',       required: true,  hints: ['order date', 'orderdate', 'date'] },
-  { key: 'customer',            label: 'Customer',         hints: ['customer', 'customer name'] },
-  { key: 'salesOrderNumber',    label: 'Sales Order #',    hints: ['sales order', 'so #', 'so#', 'sales order number'] },
-  { key: 'storeName',           label: 'Store Name',       hints: ['store name', 'store', 'dispensary'] },
-  { key: 'purchaseOrderNumber', label: 'Purchase Order #', hints: ['purchase order', 'po #', 'po#', 'purchase order number'] },
-  { key: 'licenseNumber',       label: 'License Number',   required: true,  hints: ['license number', 'license', 'license #', 'lic #'] },
+  { key: 'orderDate',              label: 'Order Date',         required: true,  hints: ['order date', 'orderdate', 'date'] },
+  { key: 'customer',               label: 'Customer',           hints: ['customer', 'customer name'] },
+  { key: 'salesOrderNumber',       label: 'Sales Order #',      hints: ['sales order', 'so #', 'so#', 'sales order number'] },
+  { key: 'storeName',              label: 'Store Name',         hints: ['store name', 'store', 'dispensary'] },
+  { key: 'purchaseOrderNumber',    label: 'Purchase Order #',   hints: ['purchase order', 'po #', 'po#', 'purchase order number'] },
+  { key: 'warehouseLicenseNumber', label: 'Warehouse License #', required: true, hints: ['warehouse license', 'supplier license', 'warehouse lic', 'pickup license'] },
+  { key: 'licenseNumber',          label: 'License Number',     required: true,  hints: ['license number', 'license', 'license #', 'lic #'] },
 ]
 
 // Sentinel used in the dropdowns to mean "skip this CSV column".
@@ -65,7 +74,15 @@ interface RowState {
 
 export default function OrderImportPanel() {
   const { user } = useAuth()
+  const { activeCompanyId } = useCompanyContext()
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Orders are always tenant-scoped, so the import endpoint hard-requires
+  // an active company. Block at the UI layer too so SuperAdmins in
+  // "All Companies" mode see a clear notice instead of uploading a CSV
+  // and hitting a server error on submit. Non-SuperAdmins are always
+  // pinned to their own company, so activeCompanyId is non-null for them.
+  const noCompanySelected = !activeCompanyId
 
   const [parsed, setParsed] = useState<ParsedCsv | null>(null)
   const [parseError, setParseError] = useState('')
@@ -88,12 +105,18 @@ export default function OrderImportPanel() {
   const [storesLoading, setStoresLoading] = useState(true)
   const [createStoreFor, setCreateStoreFor] = useState<{ rowIndex: number; license: string; storeName?: string } | null>(null)
 
+  // Warehouses keyed by license + legacy-license. Each imported row carries
+  // a Warehouse License # that resolves to one of these — the order's
+  // WarehouseId comes from that match, which is what gives the routing
+  // engine its pickup leg.
+  const [warehouses, setWarehouses] = useState<Warehouse[]>([])
+
   useEffect(() => {
     setStoresLoading(true)
-    getStores()
-      .then((s) => setStores(s))
-      .catch(() => setStores([]))
-      .finally(() => setStoresLoading(false))
+    Promise.all([
+      getStores().then((s) => setStores(s)).catch(() => setStores([])),
+      getWarehouses().then((w) => setWarehouses(w)).catch(() => setWarehouses([])),
+    ]).finally(() => setStoresLoading(false))
   }, [])
 
   const storesByLicense = useMemo(() => {
@@ -103,6 +126,18 @@ export default function OrderImportPanel() {
     }
     return m
   }, [stores])
+
+  const warehousesByLicense = useMemo(() => {
+    // Index by both LicenseNumber and LegacyLicenseNumber so a CSV that
+    // carries the older 28000xxxxx number still resolves to the right
+    // warehouse without operator surgery.
+    const m = new Map<string, Warehouse>()
+    for (const w of warehouses) {
+      if (w.licenseNumber)       m.set(w.licenseNumber.trim().toLowerCase(),       w)
+      if (w.legacyLicenseNumber) m.set(w.legacyLicenseNumber.trim().toLowerCase(), w)
+    }
+    return m
+  }, [warehouses])
 
   const { duplicates, missingRequired } = useMemo(() => {
     const counts = new Map<string, number>()
@@ -117,35 +152,45 @@ export default function OrderImportPanel() {
   }, [mapping])
 
   // Per-row resolved values + match status. Recomputed when mapping, rows,
-  // ignored flags, or the stores cache change.
+  // ignored flags, or the stores / warehouses cache change.
   const resolvedRows = useMemo(() => {
     if (!parsed) return []
     return parsed.rows.map((cells, idx) => {
       const fields = readRow(cells, mapping)
       const license = (fields.licenseNumber ?? '').trim()
       const matched = license ? storesByLicense.get(license.toLowerCase()) : undefined
+
+      const warehouseLicense = (fields.warehouseLicenseNumber ?? '').trim()
+      const matchedWarehouse = warehouseLicense
+        ? warehousesByLicense.get(warehouseLicense.toLowerCase())
+        : undefined
+
       return {
         idx,
         ignored: rowState[idx]?.ignored ?? false,
         fields,
         license,
         matched,
+        warehouseLicense,
+        matchedWarehouse,
       }
     })
-  }, [parsed, mapping, rowState, storesByLicense])
+  }, [parsed, mapping, rowState, storesByLicense, warehousesByLicense])
 
   const summary = useMemo(() => {
     let toImport = 0
     let unmatched = 0
+    let unmatchedWarehouse = 0
     let ignored = 0
     let invalidDate = 0
     for (const r of resolvedRows) {
       if (r.ignored) { ignored++; continue }
       if (!r.matched) { unmatched++; continue }
+      if (!r.matchedWarehouse) { unmatchedWarehouse++; continue }
       if (!r.fields.orderDate) { invalidDate++; continue }
       toImport++
     }
-    return { toImport, unmatched, ignored, invalidDate }
+    return { toImport, unmatched, unmatchedWarehouse, ignored, invalidDate }
   }, [resolvedRows])
 
   function handleFile(file: File) {
@@ -195,9 +240,13 @@ export default function OrderImportPanel() {
     setResult(null)
     try {
       const payload: ImportedOrderRow[] = resolvedRows
-        .filter((r) => !r.ignored && r.matched && r.fields.orderDate)
+        .filter((r) => !r.ignored && r.matched && r.matchedWarehouse && r.fields.orderDate)
         .map((r) => ({
           storeId:             r.matched!.id,
+          // warehouseId is what gives the routing engine its pickup leg —
+          // without it the resulting route is hub → stops → hub and there
+          // is no warehouse pickup waypoint.
+          warehouseId:         r.matchedWarehouse!.id,
           orderDate:           r.fields.orderDate,
           customer:            r.fields.customer,
           salesOrderNumber:    r.fields.salesOrderNumber,
@@ -226,13 +275,16 @@ export default function OrderImportPanel() {
     setCreateStoreFor(null)
   }
 
-  const blockingUnmatched = summary.unmatched > 0
-  const blockingDate      = summary.invalidDate > 0
+  const blockingUnmatched          = summary.unmatched > 0
+  const blockingUnmatchedWarehouse = summary.unmatchedWarehouse > 0
+  const blockingDate               = summary.invalidDate > 0
   const canImport =
     !submitting &&
+    !noCompanySelected &&
     missingRequired.length === 0 &&
     summary.toImport > 0 &&
     !blockingUnmatched &&
+    !blockingUnmatchedWarehouse &&
     !blockingDate
 
   return (
@@ -253,7 +305,15 @@ export default function OrderImportPanel() {
         )}
       </div>
 
-      {!parsed ? (
+      {noCompanySelected ? (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 text-sm text-amber-800">
+          <p className="font-medium">Choose a company before importing orders.</p>
+          <p className="mt-1 text-amber-700">
+            Orders are tenant-scoped, so the import has to know which company they belong to.
+            Pick a company from the switcher in the top bar, then upload your CSV.
+          </p>
+        </div>
+      ) : !parsed ? (
         <UploadDropzone fileInputRef={fileInputRef} onFile={handleFile} error={parseError} />
       ) : (
         <>
@@ -295,7 +355,10 @@ export default function OrderImportPanel() {
           <div className="bg-white rounded-xl border border-gray-200 p-4 flex items-center justify-between gap-3 flex-wrap">
             <div className="text-sm text-gray-600 flex flex-wrap items-center gap-x-4 gap-y-1">
               <span><span className="font-medium text-green-700">{summary.toImport}</span> ready</span>
-              <span><span className="font-medium text-amber-700">{summary.unmatched}</span> unmatched</span>
+              <span><span className="font-medium text-amber-700">{summary.unmatched}</span> unmatched store</span>
+              {summary.unmatchedWarehouse > 0 && (
+                <span><span className="font-medium text-amber-700">{summary.unmatchedWarehouse}</span> unmatched warehouse</span>
+              )}
               <span><span className="font-medium text-gray-500">{summary.ignored}</span> ignored</span>
               {summary.invalidDate > 0 && (
                 <span><span className="font-medium text-red-700">{summary.invalidDate}</span> invalid date</span>
@@ -320,9 +383,10 @@ export default function OrderImportPanel() {
               disabled={!canImport}
               className="px-4 py-2 bg-brand-500 text-white text-sm font-medium rounded-lg hover:bg-brand-600 disabled:opacity-50"
               title={
-                blockingUnmatched ? 'Match or ignore every row before importing.' :
-                blockingDate      ? 'Some rows have an invalid order date.' :
-                summary.toImport === 0 ? 'No rows are ready to import.' : ''
+                blockingUnmatched          ? 'Match or ignore every row before importing.' :
+                blockingUnmatchedWarehouse ? 'Map every row to a known Warehouse License # before importing.' :
+                blockingDate               ? 'Some rows have an invalid order date.' :
+                summary.toImport === 0     ? 'No rows are ready to import.' : ''
               }
             >
               {submitting ? 'Importing…' : `Import ${summary.toImport} Order${summary.toImport === 1 ? '' : 's'}`}
@@ -469,6 +533,8 @@ interface ResolvedRow {
   fields: Record<FieldKey, string | undefined>
   license: string
   matched: StoreLite | undefined
+  warehouseLicense: string
+  matchedWarehouse: Warehouse | undefined
 }
 
 function PreviewTable({
@@ -488,7 +554,7 @@ function PreviewTable({
         <div>
           <h2 className="text-sm font-semibold text-gray-800">Preview</h2>
           <p className="text-xs text-gray-500 mt-0.5">
-            Each row must either be matched to an existing store by license number or ignored. Unmatched rows can be resolved by creating a new store.
+            Each row must resolve to an existing store and warehouse by license number, or be ignored. Unmatched store rows can be resolved by creating a new store; unmatched warehouses must be added in Admin → Warehouses first.
           </p>
         </div>
         <p className="text-xs text-gray-500">{rows.length} row{rows.length === 1 ? '' : 's'}</p>
@@ -504,6 +570,7 @@ function PreviewTable({
               <th className="px-3 py-2 text-left font-medium whitespace-nowrap">Sales Order #</th>
               <th className="px-3 py-2 text-left font-medium whitespace-nowrap">Store Name (CSV)</th>
               <th className="px-3 py-2 text-left font-medium whitespace-nowrap">Purchase Order #</th>
+              <th className="px-3 py-2 text-left font-medium whitespace-nowrap">Warehouse Lic #</th>
               <th className="px-3 py-2 text-left font-medium whitespace-nowrap">License Number</th>
               <th className="px-3 py-2 text-left font-medium whitespace-nowrap">Match Status</th>
             </tr>
@@ -528,12 +595,15 @@ function PreviewTable({
                   <td className={`px-3 py-1.5 text-gray-700 whitespace-nowrap ${dim}`}>{r.fields.salesOrderNumber ?? ''}</td>
                   <td className={`px-3 py-1.5 text-gray-700 whitespace-nowrap ${dim}`}>{r.fields.storeName ?? ''}</td>
                   <td className={`px-3 py-1.5 text-gray-700 whitespace-nowrap ${dim}`}>{r.fields.purchaseOrderNumber ?? ''}</td>
+                  <td className={`px-3 py-1.5 text-gray-700 whitespace-nowrap font-mono ${dim}`}>{r.warehouseLicense || <span className="text-gray-400 italic">—</span>}</td>
                   <td className={`px-3 py-1.5 text-gray-700 whitespace-nowrap font-mono ${dim}`}>{r.license || <span className="text-gray-400 italic">—</span>}</td>
                   <td className="px-3 py-1.5 whitespace-nowrap">
                     <MatchCell
                       ignored={r.ignored}
                       license={r.license}
                       matched={r.matched}
+                      warehouseLicense={r.warehouseLicense}
+                      matchedWarehouse={r.matchedWarehouse}
                       storesLoading={storesLoading}
                       onCreateStore={() => onCreateStore(r.idx, r.license, r.fields.storeName)}
                     />
@@ -542,7 +612,7 @@ function PreviewTable({
               )
             })}
             {rows.length === 0 && (
-              <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-400">No rows to preview.</td></tr>
+              <tr><td colSpan={10} className="px-4 py-8 text-center text-gray-400">No rows to preview.</td></tr>
             )}
           </tbody>
         </table>
@@ -555,22 +625,56 @@ function MatchCell({
   ignored,
   license,
   matched,
+  warehouseLicense,
+  matchedWarehouse,
   storesLoading,
   onCreateStore,
 }: {
   ignored: boolean
   license: string
   matched: StoreLite | undefined
+  warehouseLicense: string
+  matchedWarehouse: Warehouse | undefined
   storesLoading: boolean
   onCreateStore: () => void
 }) {
   if (ignored) return <span className="text-xs text-gray-400">Ignored</span>
   if (storesLoading) return <span className="text-xs text-gray-400">Checking…</span>
   if (matched) {
+    const zoneLabel = matched.zone
+      ? matched.district
+        ? `${matched.zone} · ${matched.district}`
+        : matched.zone
+      : null
+    // Store matched, but the row still has to resolve a warehouse before
+    // the order can carry a pickup leg. Surface warehouse problems with
+    // their own message so the operator knows what to fix next.
+    if (!warehouseLicense) {
+      return (
+        <span className="inline-flex items-center gap-2 text-xs text-amber-700">
+          <span>Store {matched.name} · missing warehouse license</span>
+        </span>
+      )
+    }
+    if (!matchedWarehouse) {
+      return (
+        <span className="inline-flex items-center gap-2 text-xs text-amber-700">
+          <span>Store {matched.name} · warehouse <span className="font-mono">{warehouseLicense}</span> not found</span>
+        </span>
+      )
+    }
     return (
       <span className="inline-flex items-center gap-1.5 text-xs text-green-700">
         <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
         Matched · {matched.name}
+        <span className="ml-1 px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 text-[10px] font-medium">
+          Pickup {matchedWarehouse.businessName}
+        </span>
+        {zoneLabel && (
+          <span className="ml-1 px-1.5 py-0.5 rounded bg-green-50 text-green-700 border border-green-200 text-[10px] font-medium">
+            Zone {zoneLabel}
+          </span>
+        )}
       </span>
     )
   }

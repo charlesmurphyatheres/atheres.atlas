@@ -29,6 +29,9 @@ public class AtlasDbContext : DbContext
     public DbSet<Hub>              Hubs              => Set<Hub>();
     public DbSet<OrderBatch>       OrderBatches      => Set<OrderBatch>();
     public DbSet<Warehouse>        Warehouses        => Set<Warehouse>();
+    public DbSet<District>         Districts         => Set<District>();
+    public DbSet<Zone>             Zones             => Set<Zone>();
+    public DbSet<OptimizationAudit> OptimizationAudits => Set<OptimizationAudit>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -53,8 +56,13 @@ public class AtlasDbContext : DbContext
         modelBuilder.Entity<Truck>()
             .HasQueryFilter(t => _companyId == null || t.CompanyId == _companyId);
 
+        // Stores and Warehouses use many-to-many tenant membership (Stores.
+        // Companies / Warehouses.Companies via StoreCompanies / WarehouseCompanies
+        // join tables), so the tenant filter has to test set membership rather
+        // than a single FK equality. When _companyId is null (system/timer
+        // context), no filter is applied — same as before.
         modelBuilder.Entity<Store>()
-            .HasQueryFilter(s => _companyId == null || s.CompanyId == _companyId);
+            .HasQueryFilter(s => _companyId == null || s.Companies.Any(c => c.Id == _companyId));
 
         modelBuilder.Entity<Hub>()
             .HasQueryFilter(h => _companyId == null || h.CompanyId == _companyId);
@@ -63,7 +71,16 @@ public class AtlasDbContext : DbContext
             .HasQueryFilter(b => _companyId == null || b.CompanyId == _companyId);
 
         modelBuilder.Entity<Warehouse>()
-            .HasQueryFilter(w => _companyId == null || w.CompanyId == _companyId);
+            .HasQueryFilter(w => _companyId == null || w.Companies.Any(c => c.Id == _companyId));
+
+        modelBuilder.Entity<District>()
+            .HasQueryFilter(d => _companyId == null || d.CompanyId == _companyId);
+
+        modelBuilder.Entity<Zone>()
+            .HasQueryFilter(z => _companyId == null || z.CompanyId == _companyId);
+
+        modelBuilder.Entity<OptimizationAudit>()
+            .HasQueryFilter(a => _companyId == null || a.CompanyId == _companyId);
 
         // RouteStops and Confirmations are accessed through their parent
         // (Route and Order respectively) — no direct filter needed.

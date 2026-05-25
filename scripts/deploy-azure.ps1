@@ -201,44 +201,72 @@ function Assert-FunctionAppIndexed {
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $attempt = 0
     $indexed = $null
-    while ((Get-Date) -lt $deadline) {
-        $attempt++
-        $raw = az functionapp function list `
-            --resource-group $ResourceGroup `
-            --name $AppName `
-            -o json 2>$null
-        if ($LASTEXITCODE -eq 0 -and $raw) {
-            try {
-                $indexed = $raw | ConvertFrom-Json
-                $names = @($indexed | ForEach-Object { $_.name -replace '^.+/', '' })
-                if ($ExpectedAny.Count -eq 0 -and $names.Count -gt 0) {
-                    Write-Host "  [ok] $AppName indexed $($names.Count) function(s): $($names -join ', ')" -ForegroundColor Green
-                    return
-                }
-                $matched = @($names | Where-Object { $ExpectedAny -contains $_ })
-                if ($matched.Count -gt 0) {
-                    Write-Host "  [ok] $AppName indexed: $($names -join ', ')" -ForegroundColor Green
-                    return
-                }
-            } catch { }
+    $lastListErr = ''
+    $errFile = [System.IO.Path]::GetTempFileName()
+    try {
+        while ((Get-Date) -lt $deadline) {
+            $attempt++
+            # Capture stderr so we can surface *why* the list call is failing
+            # (auth/network/Azure-side) instead of the opaque "<list call failed>".
+            $raw = az functionapp function list `
+                --resource-group $ResourceGroup `
+                --name $AppName `
+                -o json 2>$errFile
+            if ($LASTEXITCODE -eq 0 -and $raw) {
+                try {
+                    $indexed = $raw | ConvertFrom-Json
+                    $names = @($indexed | ForEach-Object { $_.name -replace '^.+/', '' })
+                    if ($ExpectedAny.Count -eq 0 -and $names.Count -gt 0) {
+                        Write-Host "  [ok] $AppName indexed $($names.Count) function(s): $($names -join ', ')" -ForegroundColor Green
+                        return
+                    }
+                    $matched = @($names | Where-Object { $ExpectedAny -contains $_ })
+                    if ($matched.Count -gt 0) {
+                        Write-Host "  [ok] $AppName indexed: $($names -join ', ')" -ForegroundColor Green
+                        return
+                    }
+                } catch { }
+            } else {
+                $lastListErr = (Get-Content $errFile -Raw -ErrorAction SilentlyContinue) -as [string]
+            }
+            Start-Sleep 10
+            Write-Host "." -NoNewline -ForegroundColor DarkGray
         }
-        Start-Sleep 10
-        Write-Host "." -NoNewline -ForegroundColor DarkGray
+    } finally {
+        Remove-Item $errFile -ErrorAction SilentlyContinue
     }
     Write-Host ""
+
+    # On timeout, run the same diagnostic checks inline so the error message
+    # includes the actual runtime config / last list-call stderr instead of
+    # telling the user to go run three more commands by hand.
     $current = if ($indexed) { ($indexed | ForEach-Object { $_.name -replace '^.+/', '' }) -join ', ' } else { '<list call failed>' }
+    $linuxFx       = (az functionapp config show              -g $ResourceGroup -n $AppName --query linuxFxVersion -o tsv 2>$null)
+    $workerRuntime = (az functionapp config appsettings list  -g $ResourceGroup -n $AppName --query "[?name=='FUNCTIONS_WORKER_RUNTIME'].value" -o tsv 2>$null)
+    $extVersion    = (az functionapp config appsettings list  -g $ResourceGroup -n $AppName --query "[?name=='FUNCTIONS_EXTENSION_VERSION'].value" -o tsv 2>$null)
+    $listErrText   = if ([string]::IsNullOrWhiteSpace($lastListErr)) { '(no stderr captured)' } else { $lastListErr.Trim() }
+
     throw @"
 $AppName has no user functions indexed after $TimeoutSeconds s.
 Currently indexed: $current
 Expected at least one of: $($ExpectedAny -join ', ')
 
+Runtime config (observed now):
+  linuxFxVersion              = $linuxFx
+  FUNCTIONS_WORKER_RUNTIME    = $workerRuntime
+  FUNCTIONS_EXTENSION_VERSION = $extVersion
+
+Last 'az functionapp function list' stderr:
+  $listErrText
+
 Common causes:
-  - linuxFxVersion isn't DOTNET-ISOLATED|8.0. Run:
-      az functionapp config show -g $ResourceGroup -n $AppName --query linuxFxVersion
-  - FUNCTIONS_WORKER_RUNTIME isn't dotnet-isolated. Run:
-      az functionapp config appsettings list -g $ResourceGroup -n $AppName --query "[?name=='FUNCTIONS_WORKER_RUNTIME']"
+  - linuxFxVersion isn't DOTNET-ISOLATED|8.0 (see above).
+  - FUNCTIONS_WORKER_RUNTIME isn't dotnet-isolated (see above).
+  - Worker is crashing on startup. Tail logs to see the exception:
+      az webapp log tail -g $ResourceGroup -n $AppName
   - Publish uploaded an empty package. Re-run publish with --verbose and watch
-    the 'Functions in <app>:' list before the upload.
+    the 'Functions in <app>:' list it prints after upload — if that list is
+    empty too, the host indexed zero functions from the package.
 
 Or: .\deploy-azure.ps1 -Diagnose
 "@
@@ -1226,6 +1254,38 @@ if (-not $authReady) {
 }
 Write-Host "  Auth Functions is responding; startup seed has populated Companies + Users." -ForegroundColor Green
 
+# ---- Nuke order + route data ------------------------------------------------
+# Every deploy starts with zero orders, routes, batches, and confirmations so
+# iterative end-to-end testing (CSV import → schedule → optimize) doesn't
+# accumulate carry-over rows between runs. Master data (stores, warehouses,
+# hubs, trucks, districts, zones, users) is preserved — only the
+# transactional shell is wiped (see scripts/sql/nuke-route-data.sql). The
+# LocalDev firewall rule provisioned earlier in this script grants this
+# host's IP access to the Azure SQL server.
+Write-Host "`n=== Nuking order + route data ===" -ForegroundColor Cyan
+$nukeSqlPath = Join-Path $PSScriptRoot "sql/nuke-route-data.sql"
+if (Test-Path $nukeSqlPath) {
+    Add-Type -AssemblyName System.Data -ErrorAction SilentlyContinue
+    $nukeConn = New-Object System.Data.SqlClient.SqlConnection $SqlConnectionString
+    try {
+        $nukeConn.Open()
+        $nukeCmd = $nukeConn.CreateCommand()
+        $nukeCmd.CommandText    = Get-Content $nukeSqlPath -Raw
+        $nukeCmd.CommandTimeout = 60
+        $nukeCmd.ExecuteNonQuery() | Out-Null
+        Write-Host "  [OK] Orders, Routes, RouteStops, OrderBatches, Confirmations wiped." -ForegroundColor Green
+    }
+    catch {
+        # Don't fail the deploy on a wipe error -- a fresh DB has nothing to wipe.
+        Write-Host "  [warn] Order + route data wipe failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+    finally {
+        $nukeConn.Close()
+    }
+} else {
+    Write-Host "  [warn] nuke-route-data.sql not found at $nukeSqlPath -- skipping wipe." -ForegroundColor Yellow
+}
+
 # Import reference data (Stores, Warehouses, Hubs, Vans) -- safe now that the
 # Secure Transport company row exists.
 Write-Host "`n=== Importing Reference Data ===" -ForegroundColor Cyan
@@ -1262,13 +1322,18 @@ function Get-ImporterSeedStatus {
     try {
         $conn.Open()
 
+        # Warehouses.CompanyId was dropped in 20260524000002_StoresWarehousesMultiCompany;
+        # the company link now lives in the WarehouseCompanies join table.
         $whCmd = $conn.CreateCommand()
         $whCmd.CommandText = @"
 SELECT COUNT(*) FROM (
-    SELECT TOP (5) Id FROM Warehouses
-    WHERE CompanyId = '10000000-0000-0000-0000-000000000001' AND IsActive = 1
-    ORDER BY BusinessName
-) w
+    SELECT TOP (5) w.Id
+    FROM   Warehouses w
+    INNER JOIN WarehouseCompanies wc ON wc.WarehouseId = w.Id
+    WHERE  wc.CompanyId = '10000000-0000-0000-0000-000000000001'
+      AND  w.IsActive = 1
+    ORDER BY w.BusinessName
+) x
 "@
         $expected = [int]$whCmd.ExecuteScalar()
 
@@ -1311,14 +1376,19 @@ for ($attempt = 1; $attempt -le $importerAttempts -and -not $importerOk; $attemp
         Write-Host "  [OK] $($status.Actual)/$($status.Expected) OrderImporter users present." -ForegroundColor Green
         break
     }
+    # $status stays $null when every probe in the window threw (e.g. schema
+    # drift like a renamed/dropped column). Render "?/?" instead of crashing
+    # on a missing property so the underlying SQL warning above stays visible.
+    $actualText   = if ($status) { $status.Actual }   else { '?' }
+    $expectedText = if ($status) { $status.Expected } else { '?' }
     if ($attempt -lt $importerAttempts) {
-        Write-Host "  [retry $attempt/$importerAttempts] Only $($status.Actual)/$($status.Expected) importer users present. Restarting $FuncAppAuth..." -ForegroundColor Yellow
+        Write-Host "  [retry $attempt/$importerAttempts] Only $actualText/$expectedText importer users present. Restarting $FuncAppAuth..." -ForegroundColor Yellow
         az functionapp restart --resource-group $ResourceGroup --name $FuncAppAuth --output none
         Assert-AzSuccess "$FuncAppAuth restart for importer seed retry"
         Start-Sleep 20
     } else {
         throw @"
-OrderImporter users still missing after $importerAttempts restart attempts ($($status.Actual)/$($status.Expected)).
+OrderImporter users still missing after $importerAttempts restart attempts ($actualText/$expectedText).
 The Auth Functions startup seed is not creating data_*@securetransport.com accounts.
 Inspect logs:
   az webapp log tail -g $ResourceGroup -n $FuncAppAuth

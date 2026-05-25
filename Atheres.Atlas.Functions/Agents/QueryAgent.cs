@@ -27,6 +27,7 @@ public class QueryAgent
     private readonly AtlasDbContext _db;
     private readonly ICompanyContext _companyContext;
     private readonly RouteOptimizationAgent _optimizer;
+    private readonly PdfService _pdf;
     private readonly ILogger<QueryAgent> _logger;
 
     public QueryAgent(
@@ -37,6 +38,7 @@ public class QueryAgent
         AtlasDbContext db,
         ICompanyContext companyContext,
         RouteOptimizationAgent optimizer,
+        PdfService pdf,
         ILogger<QueryAgent> logger)
     {
         _orders = orders;
@@ -46,6 +48,7 @@ public class QueryAgent
         _db = db;
         _companyContext = companyContext;
         _optimizer = optimizer;
+        _pdf = pdf;
         _logger = logger;
     }
 
@@ -180,10 +183,16 @@ public class QueryAgent
         }
         else
         {
+            // No date filter — take the 10 most recent routes. Within a
+            // day, ScheduledDepartTime ascending so Pickup vans land
+            // above the paired ZonedDelivery vans (Legacy null-times to
+            // the end).
             routes = await _db.Routes
                 .Include(r => r.Stops).ThenInclude(s => s.Order)
                 .Include(r => r.Warehouse)
                 .OrderByDescending(r => r.DeliveryDate)
+                .ThenBy(r => r.ScheduledDepartTime ?? DateTime.MaxValue)
+                .ThenBy(r => r.RouteType)
                 .Take(10)
                 .ToListAsync(ct);
         }
@@ -208,6 +217,60 @@ public class QueryAgent
         if (route is null) return new NotFoundObjectResult(new { error = "Route not found." });
 
         return new OkObjectResult(MapRoute(route));
+    }
+
+    // -----------------------------------------------------------------------
+    // GET /api/routes/{id}/itinerary.pdf
+    //
+    // Server-side iText PDF — one-page driver itinerary with the route's
+    // start, optional warehouse pickup, every numbered delivery stop
+    // (name / full address / leg miles / arrive / depart), and the
+    // return-to-hub row. Pulled into the AdminPanel Routes tab + the
+    // Logistics screen via a print icon.
+    // -----------------------------------------------------------------------
+    [Function("query-routes-itinerary-pdf")]
+    public async Task<IActionResult> GetRouteItineraryPdf(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "routes/{id:guid}/itinerary.pdf")]
+        HttpRequest req,
+        Guid id,
+        CancellationToken ct)
+    {
+        var route = await _routes.GetByIdAsync(id, ct);
+        if (route is null) return new NotFoundObjectResult(new { error = "Route not found." });
+
+        // Per-stop service time: pull the assigned truck's setting if
+        // present; fall back to the entity default (currently 15 min).
+        // Drives the Depart column on every delivery row.
+        var settingsKey = route.TruckId?.ToString() ?? "default";
+        var settings = await _settings.GetByUserIdAsync(settingsKey, ct);
+        var serviceMinutes = settings?.WaitMinutesPerStop ?? Atheres.Atlas.Domain.Entities.UserRouteSettings.DefaultWaitMinutesPerStop;
+
+        var bytes    = _pdf.BuildRouteItinerary(route, serviceMinutes);
+        var fileName = $"route-{route.DeliveryDate:yyyy-MM-dd}-{route.Id.ToString("N").Substring(0, 8)}.pdf";
+        return new FileContentResult(bytes, "application/pdf") { FileDownloadName = fileName };
+    }
+
+    // -----------------------------------------------------------------------
+    // GET /api/optimization-audits/{id}/pdf
+    //
+    // Server-side iText reproduction of the audit body — replaces the
+    // jsPDF download that lived in the AdminPanel.
+    // -----------------------------------------------------------------------
+    [Function("query-optimization-audits-pdf")]
+    [Authorize(Roles = "Admin,SuperAdmin")]
+    public async Task<IActionResult> GetOptimizationAuditPdf(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "optimization-audits/{id:guid}/pdf")]
+        HttpRequest req,
+        Guid id,
+        CancellationToken ct)
+    {
+        var audit = await _db.OptimizationAudits.FirstOrDefaultAsync(a => a.Id == id, ct);
+        if (audit is null) return new NotFoundObjectResult(new { error = "Audit not found." });
+
+        var bytes    = _pdf.BuildAuditPdf(audit);
+        var stamp    = audit.CreatedAt.ToString("yyyy-MM-dd-HHmmss");
+        var fileName = $"optimization-audit-{stamp}.pdf";
+        return new FileContentResult(bytes, "application/pdf") { FileDownloadName = fileName };
     }
 
     private static object MapRoute(Domain.Entities.DeliveryRoute r)
@@ -250,6 +313,15 @@ public class QueryAgent
             r.TruckId,
             r.HubId,
             r.WarehouseId,
+            // New-flow shape fields. The Routes tab can use these to label
+            // Pickup vans, ZonedDelivery vans, and DirectDelivery vans
+            // distinctly. ScheduledDepartTime / HubArrivalTime are non-null
+            // only for the routes that have a meaningful timing offset
+            // (e.g. ZonedDelivery vans waiting for the hub sort to finish).
+            routeType           = r.RouteType.ToString(),
+            r.ZoneId,
+            r.ScheduledDepartTime,
+            r.HubArrivalTime,
             warehousePickup,
             r.DeliveryDate,
             r.StartAddress,
@@ -296,6 +368,73 @@ public class QueryAgent
     }
 
     // -----------------------------------------------------------------------
+    // GET /api/optimization-audits     (Admin / SuperAdmin)
+    // GET /api/optimization-audits/{id} (Admin / SuperAdmin)
+    //
+    // The list returns headers only — id, timestamps, counts, summary — so
+    // the AdminPanel can render a sortable table without pulling every
+    // multi-kilobyte LogText body. The detail endpoint streams the full
+    // log so the PDF generator (and the in-page viewer) has the complete
+    // trail.
+    // -----------------------------------------------------------------------
+    [Function("query-optimization-audits-list")]
+    [Authorize(Roles = "Admin,SuperAdmin")]
+    public async Task<IActionResult> ListOptimizationAudits(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "optimization-audits")]
+        HttpRequest req, CancellationToken ct)
+    {
+        var take = int.TryParse(req.Query["take"], out var t) ? Math.Clamp(t, 1, 200) : 50;
+        var audits = await _db.OptimizationAudits
+            .OrderByDescending(a => a.CreatedAt)
+            .Take(take)
+            .Select(a => new
+            {
+                a.Id,
+                a.CompanyId,
+                a.CreatedAt,
+                a.TriggeredBy,
+                a.Trigger,
+                a.Summary,
+                a.OrderCount,
+                a.RouteCount,
+                a.WarehouseCount,
+                a.HubCount,
+                a.ZoneCount,
+                a.DirectDeliveryCount,
+            })
+            .ToListAsync(ct);
+        return new OkObjectResult(audits);
+    }
+
+    [Function("query-optimization-audits-get")]
+    [Authorize(Roles = "Admin,SuperAdmin")]
+    public async Task<IActionResult> GetOptimizationAudit(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "optimization-audits/{id:guid}")]
+        HttpRequest req, Guid id, CancellationToken ct)
+    {
+        var audit = await _db.OptimizationAudits
+            .FirstOrDefaultAsync(a => a.Id == id, ct);
+        if (audit is null)
+            return new NotFoundObjectResult(new { error = "Audit not found." });
+        return new OkObjectResult(new
+        {
+            audit.Id,
+            audit.CompanyId,
+            audit.CreatedAt,
+            audit.TriggeredBy,
+            audit.Trigger,
+            audit.Summary,
+            audit.OrderCount,
+            audit.RouteCount,
+            audit.WarehouseCount,
+            audit.HubCount,
+            audit.ZoneCount,
+            audit.DirectDeliveryCount,
+            audit.LogText,
+        });
+    }
+
+    // -----------------------------------------------------------------------
     // GET /api/stores
     // -----------------------------------------------------------------------
     [Function("query-stores-list")]
@@ -303,10 +442,37 @@ public class QueryAgent
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "stores")]
         HttpRequest req, CancellationToken ct)
     {
+        // Defensive filter: a handful of legacy rows from earlier imports had
+        // empty Name and/or LicenseNumber. They render as blank rows in the
+        // dashboard, so skip them server-side rather than asking every caller
+        // to filter. import-data.ps1 also deactivates these on next run.
         var stores = await _db.Stores
-            .Where(s => s.IsActive)
+            .Where(s => s.IsActive
+                     && s.Name          != null && s.Name          != ""
+                     && s.LicenseNumber != null && s.LicenseNumber != "")
             .OrderBy(s => s.Name)
-            .Select(s => new { s.Id, s.Name, s.LicenseNumber, s.Customer, s.City })
+            .Select(s => new
+            {
+                s.Id,
+                companies = s.Companies.Select(c => new { id = c.Id, name = c.Name }),
+                s.Name,
+                s.LicenseNumber,
+                s.Customer,
+                // Full address + contact fields so the Admin Panel can
+                // pre-fill the edit form without a separate GET. Cheap to
+                // project — no extra joins beyond what we already do for
+                // Zone / District.
+                s.Address,
+                s.City,
+                s.State,
+                s.Zip,
+                s.County,
+                s.Email,
+                s.Phone,
+                s.IsActive,
+                Zone     = s.Zone == null ? null : s.Zone.Code,
+                District = s.Zone == null ? null : s.Zone.District.Name,
+            })
             .ToListAsync(ct);
 
         return new OkObjectResult(stores);
@@ -481,10 +647,12 @@ public class QueryAgent
         var messages = new List<RouteOptimizationRequestMessage>();
         foreach (var group in groups)
         {
-            var pickupSlot = group.Key.HasValue ? 1 : 0;
-            // Subtract the pickup waypoint when there is one so the actual
-            // delivery count never exceeds the configured per-route cap.
-            var chunkSize = Math.Max(1, maxStopsPerRoute - pickupSlot);
+            // MaxStopsPerRoute counts delivery stops only; the warehouse
+            // pickup leg is not counted against the cap. Mirrors the
+            // chunking in RouteScheduler — both must agree or operators
+            // get a different stop count between the bulk-Scheduled flow
+            // and the on-demand Optimize Now path.
+            var chunkSize  = Math.Max(1, maxStopsPerRoute);
             var orderedIds = group.Select(o => o.Id).ToList();
             for (int i = 0; i < orderedIds.Count; i += chunkSize)
             {

@@ -278,7 +278,7 @@ static async Task SeedWarehouseImportersAsync(
 {
     var warehouses = await db.Warehouses
         .IgnoreQueryFilters()
-        .Where(w => w.CompanyId == companyId && w.IsActive)
+        .Where(w => w.IsActive && w.Companies.Any(c => c.Id == companyId))
         .OrderBy(w => w.BusinessName)
         .Take(maxToSeed)
         .ToListAsync();

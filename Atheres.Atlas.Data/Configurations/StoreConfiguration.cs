@@ -24,14 +24,39 @@ public class StoreConfiguration : IEntityTypeConfiguration<Store>
         builder.Property(s => s.Phone).HasMaxLength(30);
         builder.Property(s => s.FormattedAddress).HasMaxLength(500);
 
-        builder.HasIndex(s => s.CompanyId);
-        builder.HasIndex(s => new { s.CompanyId, s.IsActive });
         builder.HasIndex(s => s.LicenseNumber);
         builder.HasIndex(s => s.Customer);
+        builder.HasIndex(s => s.ZoneId);
 
         builder.HasMany(s => s.Orders)
             .WithOne(o => o.Store)
             .HasForeignKey(o => o.StoreId)
             .OnDelete(DeleteBehavior.NoAction);
+
+        // Many-to-many: a Store can belong to multiple Companies. The join
+        // table is the canonical tenant-membership for stores — the global
+        // query filter checks it on every Stores query. Columns are named
+        // explicitly so the migration + raw SQL elsewhere stays readable.
+        // The Companies-side FK is NO ACTION (not Cascade) on purpose. SQL
+        // Server forbids multiple cascade paths into the same table, and
+        // Companies already cascade-deletes into Hubs/Trucks/Routes, which
+        // eventually reach Stores via Order.StoreId. Adding a second cascade
+        // path Companies -> StoreCompanies -> (indirectly) Stores trips
+        // error 1785. Companies are very rarely hard-deleted anyway —
+        // they're soft-deactivated via IsActive — so leaving the cleanup
+        // manual on the Companies side is fine. Deleting a Store still
+        // cascades the join rows the obvious way.
+        builder.HasMany(s => s.Companies)
+            .WithMany(c => c.Stores)
+            .UsingEntity<Dictionary<string, object>>(
+                "StoreCompanies",
+                j => j.HasOne<Company>().WithMany().HasForeignKey("CompanyId").OnDelete(DeleteBehavior.NoAction),
+                j => j.HasOne<Store>().WithMany().HasForeignKey("StoreId").OnDelete(DeleteBehavior.Cascade),
+                j =>
+                {
+                    j.ToTable("StoreCompanies");
+                    j.HasKey("StoreId", "CompanyId");
+                    j.HasIndex("CompanyId");
+                });
     }
 }

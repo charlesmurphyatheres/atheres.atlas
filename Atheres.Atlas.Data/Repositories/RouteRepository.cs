@@ -21,6 +21,14 @@ public class RouteRepository : IRouteRepository
             .Include(r => r.Stops).ThenInclude(s => s.Order)
             .Include(r => r.Warehouse)
             .Where(r => r.DeliveryDate.Date == date.Date)
+            // Order by ScheduledDepartTime ascending so the Pickup van's
+            // route (window-start, e.g. 08:00) appears before its paired
+            // ZonedDelivery routes (pickup-return + sort wait, e.g. 09:22).
+            // Routes with no ScheduledDepartTime (Legacy) sort to the end.
+            // The frontend re-sorts defensively but this gives a clean
+            // baseline to any other caller of GetByDateAsync.
+            .OrderBy(r => r.ScheduledDepartTime ?? DateTime.MaxValue)
+            .ThenBy(r => r.RouteType)
             .ToListAsync(ct);
 
     public async Task AddAsync(DeliveryRoute route, CancellationToken ct = default) =>

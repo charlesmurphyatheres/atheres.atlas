@@ -313,7 +313,12 @@ public class ManagementAgent
         RouteEnqueueResult? schedulerResult = null;
         if (effective == OrderStatus.Scheduled)
         {
-            schedulerResult = await _scheduler.EnqueueAsync(new[] { order }, order.CompanyId, ct);
+            var triggeredBy = req.HttpContext.User?.Identity?.Name
+                              ?? req.HttpContext.User?.FindFirst("email")?.Value;
+            schedulerResult = await _scheduler.EnqueueAsync(
+                new[] { order }, order.CompanyId, ct,
+                triggeredBy: triggeredBy,
+                trigger:     "Single order → Scheduled");
         }
 
         return new OkObjectResult(new
@@ -469,10 +474,17 @@ public class ManagementAgent
         var geocodeFailures    = 0;
         if (scheduledOrders.Count > 0)
         {
+            // Capture who triggered the run so the Optimization Audit tab
+            // can attribute each row. Falls back to the user's name/email
+            // claim, or the empty string when neither is present.
+            var triggeredBy = req.HttpContext.User?.Identity?.Name
+                              ?? req.HttpContext.User?.FindFirst("email")?.Value;
             foreach (var byCompany in scheduledOrders.GroupBy(o => o.CompanyId))
             {
                 var outcome = await _scheduler.EnqueueAsync(
-                    byCompany.ToList(), byCompany.Key, ct);
+                    byCompany.ToList(), byCompany.Key, ct,
+                    triggeredBy: triggeredBy,
+                    trigger:     "Bulk status update → Scheduled");
                 routesQueued       += outcome.RoutesQueued;
                 ordersUngeocoded   += outcome.OrdersUngeocoded;
                 noActiveHub        |= outcome.NoActiveHub;
@@ -630,6 +642,96 @@ public class ManagementAgent
         _logger.LogInformation("Order {OrderId} archived", orderId);
 
         return new OkObjectResult(new { orderId, status = "Archived" });
+    }
+
+    // -----------------------------------------------------------------------
+    // DELETE /api/orders/{id}  (Admin / SuperAdmin only)
+    // Hard-deletes a single order plus its RouteStops and Confirmations. The
+    // class-level Authorize permits Logistics; this attribute tightens the
+    // gate to Admin/SuperAdmin per the "deletions only on admin screens"
+    // rule. AuditLog rows pointing at the order have OrderId set to NULL by
+    // the FK (OrderConfiguration: AuditLogs OnDelete SetNull) so history
+    // survives the delete.
+    // -----------------------------------------------------------------------
+    [Function("mgmt-orders-delete")]
+    [Authorize(Roles = "Admin,SuperAdmin")]
+    public async Task<IActionResult> DeleteOrder(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "delete", Route = "orders/{id:guid}")]
+        HttpRequest req,
+        Guid id,
+        CancellationToken ct)
+    {
+        // Tenant filter applies via the global query filter for non-SuperAdmin
+        // callers, so a company Admin can't reach orders that don't belong to
+        // them.
+        var order = await _db.Orders.FirstOrDefaultAsync(o => o.Id == id, ct);
+        if (order is null)
+            return new NotFoundObjectResult(new { error = "Order not found." });
+
+        // Explicit child deletes — RouteStop.OrderId is non-nullable and the
+        // EF model doesn't expose an inverse Orders.Stops collection, so we
+        // can't rely on EF to cascade. Confirmations cascade automatically
+        // via OrderConfiguration but go through the same path for clarity.
+        await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM RouteStops WHERE OrderId = {id}", ct);
+        await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM Confirmations WHERE OrderId = {id}", ct);
+
+        _db.Orders.Remove(order);
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("Order {OrderId} deleted by admin", id);
+        return new OkObjectResult(new { id, message = "Order deleted." });
+    }
+
+    // -----------------------------------------------------------------------
+    // DELETE /api/routes/{id}  (Admin / SuperAdmin only)
+    // Hard-deletes a single route and resets its orders so the operator can
+    // re-schedule them. Cascading from Routes to RouteStops is configured
+    // CASCADE in DeliveryRouteConfiguration, so the stops go on their own;
+    // we update the Orders row explicitly to clear the routing-state fields
+    // and revert Status to Ordered (the natural starting point for a fresh
+    // schedule attempt).
+    // -----------------------------------------------------------------------
+    [Function("mgmt-routes-delete")]
+    [Authorize(Roles = "Admin,SuperAdmin")]
+    public async Task<IActionResult> DeleteRoute(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "delete", Route = "routes/{id:guid}")]
+        HttpRequest req,
+        Guid id,
+        CancellationToken ct)
+    {
+        var route = await _db.Routes.FirstOrDefaultAsync(r => r.Id == id, ct);
+        if (route is null)
+            return new NotFoundObjectResult(new { error = "Route not found." });
+
+        var nowUtc = DateTime.UtcNow;
+        var ordersOnRoute = await _db.Orders
+            .Where(o => o.RouteId == id)
+            .ToListAsync(ct);
+        foreach (var o in ordersOnRoute)
+        {
+            o.RouteId              = null;
+            o.StopSequence         = null;
+            o.ExpectedDeliveryDate = null;
+            o.ConfirmationDeadline = null;
+            o.ConfirmedAt          = null;
+            o.Status               = OrderStatus.Ordered;
+            o.UpdatedAt            = nowUtc;
+        }
+
+        _db.Routes.Remove(route);
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation(
+            "Route {RouteId} deleted by admin; {OrderCount} order(s) reverted to Ordered",
+            id, ordersOnRoute.Count);
+        return new OkObjectResult(new
+        {
+            id,
+            message      = "Route deleted.",
+            ordersReset  = ordersOnRoute.Count,
+        });
     }
 
     // -----------------------------------------------------------------------

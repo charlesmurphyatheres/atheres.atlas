@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { getUsers, registerUser, deactivateUser, getOrders, updateOrderStatus, bulkUpdateOrderStatus, getRoutes, getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse, getHubs, createHub, updateHub, deleteHub, getTrucks, createTruck, updateTruck, deleteTruck } from '../../services/apiService'
+import { getUsers, registerUser, deactivateUser, getOrders, updateOrderStatus, bulkUpdateOrderStatus, getRoutes, getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse, getHubs, createHub, updateHub, deleteHub, getTrucks, createTruck, updateTruck, deleteTruck, getStores, updateStore, getCompanies, deleteOrder, deleteRoute, getOptimizationAudits, getOptimizationAudit, printRouteItinerary, printOptimizationAudit, type StoreLite, type UpdateStorePayload, type OptimizationAuditSummary, type OptimizationAuditDetail } from '../../services/apiService'
 import BulkStatusBar from '../ui/BulkStatusBar'
 import { summarizeBulkStatusResult } from '../ui/bulkStatusSummary'
 import { TRUCK_STATUSES, type TruckStatus } from '../../types'
@@ -8,12 +8,44 @@ import { SortHeader } from '../ui/SortHeader'
 import type { AppUser, Order, Route, Role, Warehouse, Hub, Truck } from '../../types'
 import { format } from 'date-fns'
 import { useAuth } from '../../contexts/AuthContext'
+import { useCompanyContext } from '../../contexts/CompanyContext'
 
-type Tab = 'users' | 'orders' | 'routes' | 'warehouses' | 'hubs' | 'vans'
+type Tab = 'users' | 'orders' | 'routes' | 'warehouses' | 'hubs' | 'vans' | 'stores' | 'audits'
+
+/** Props every tab accepts so it can render a Company column when a
+ *  SuperAdmin is viewing "All Companies". `companyName(id)` returns the
+ *  display name for a row's companyId, or "—" if the company is unknown
+ *  (e.g. global accounts with no companyId). When `showCompany` is false
+ *  tabs render their original layout untouched. */
+type CompanyDisplay = {
+  showCompany: boolean
+  companyName: (id?: string | null) => string
+}
 
 export default function AdminPanel() {
-  const { user } = useAuth()
+  const { user, isRole } = useAuth()
+  const { activeCompanyId } = useCompanyContext()
   const [tab, setTab] = useState<Tab>('orders')
+
+  // "All Companies" mode is only meaningful for SuperAdmins who have not
+  // chosen a specific company in the company picker. Everyone else sees
+  // exactly one company's data, so the extra column is just noise.
+  const showCompany = isRole('SuperAdmin') && !activeCompanyId
+
+  const [companies, setCompanies] = useState<{ id: string; name: string }[]>([])
+  useEffect(() => {
+    if (!showCompany) return
+    getCompanies()
+      .then((cs) => setCompanies(cs.map((c) => ({ id: c.id, name: c.name }))))
+      .catch(() => setCompanies([]))
+  }, [showCompany])
+
+  const companyName = useMemo(() => {
+    const map = new Map(companies.map((c) => [c.id, c.name]))
+    return (id?: string | null) => (id ? (map.get(id) ?? '—') : '—')
+  }, [companies])
+
+  const display: CompanyDisplay = { showCompany, companyName }
 
   return (
     <div className="space-y-4">
@@ -25,7 +57,7 @@ export default function AdminPanel() {
       </div>
 
       <div className="flex gap-1 border-b border-gray-200">
-        {(['orders', 'routes', 'hubs', 'vans', 'warehouses', 'users'] as Tab[]).map((t) => (
+        {(['orders', 'routes', 'hubs', 'vans', 'warehouses', 'stores', 'users', 'audits'] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -40,19 +72,27 @@ export default function AdminPanel() {
         ))}
       </div>
 
-      {tab === 'orders' && <OrdersTab />}
-      {tab === 'routes' && <RoutesTab />}
-      {tab === 'hubs' && <HubsTab />}
-      {tab === 'vans' && <VansTab />}
-      {tab === 'warehouses' && <WarehousesTab />}
-      {tab === 'users' && <UsersTab />}
+      {tab === 'orders' && <OrdersTab {...display} />}
+      {tab === 'routes' && <RoutesTab {...display} />}
+      {tab === 'hubs' && <HubsTab {...display} />}
+      {tab === 'vans' && <VansTab {...display} />}
+      {tab === 'warehouses' && <WarehousesTab {...display} />}
+      {tab === 'stores' && <StoresTab {...display} />}
+      {tab === 'users' && <UsersTab {...display} />}
+      {tab === 'audits' && <OptimizationAuditsTab />}
     </div>
   )
 }
 
 // ---- Orders Tab ----
 
-function OrdersTab() {
+function OrdersTab({ showCompany, companyName }: CompanyDisplay) {
+  const { isRole } = useAuth()
+  // Hard-deletes are gated to Admin/SuperAdmin on both the backend
+  // (mgmt-orders-delete / mgmt-routes-delete in ManagementAgent.cs) and
+  // the UI here. Logistics users see the rest of the admin panel but no
+  // Delete button.
+  const canDelete = isRole('Admin', 'SuperAdmin')
   const [orders, setOrders] = useState<Order[]>([])
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState('')
@@ -61,6 +101,7 @@ function OrdersTab() {
     accessors: {
       address:      (o) => `${o.address ?? ''}, ${o.city ?? ''}`,
       districtZone: (o) => `${o.district ?? ''} / ${o.zone ?? ''}`,
+      company:      (o) => companyName(o.companyId),
     },
   })
 
@@ -76,6 +117,19 @@ function OrdersTab() {
       setOrders(result.items)
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function handleDelete(orderId: string) {
+    if (!confirm('Delete this order? This cannot be undone.')) return
+    // Optimistic remove; revert + alert if the server refuses.
+    const snapshot = orders
+    setOrders((prev) => prev.filter((o) => o.id !== orderId))
+    try {
+      await deleteOrder(orderId)
+    } catch {
+      setOrders(snapshot)
+      alert('Failed to delete order.')
     }
   }
 
@@ -185,6 +239,9 @@ function OrdersTab() {
                       title="Select all on this page"
                     />
                   </th>
+                  {showCompany && (
+                    <SortHeader label="Company"     sortKey="company"              activeKey={sortKey} dir={sortDir} onClick={() => toggle('company')} />
+                  )}
                   <SortHeader label="Store"         sortKey="storeName"            activeKey={sortKey} dir={sortDir} onClick={() => toggle('storeName')} />
                   <SortHeader label="Address"       sortKey="address"              activeKey={sortKey} dir={sortDir} onClick={() => toggle('address')} />
                   <SortHeader label="District/Zone" sortKey="districtZone"         activeKey={sortKey} dir={sortDir} onClick={() => toggle('districtZone')} />
@@ -205,6 +262,9 @@ function OrdersTab() {
                         className="rounded border-gray-300 text-brand-500 focus:ring-brand-400 cursor-pointer"
                       />
                     </td>
+                    {showCompany && (
+                      <td className="px-4 py-3 text-gray-500 text-xs">{companyName(o.companyId)}</td>
+                    )}
                     <td className="px-4 py-3 font-medium text-gray-900">{o.storeName}</td>
                     <td className="px-4 py-3 text-gray-600">{o.address}, {o.city}</td>
                     <td className="px-4 py-3 text-gray-500">{o.district} / {o.zone}</td>
@@ -216,21 +276,32 @@ function OrdersTab() {
                       <StatusBadge status={o.status} />
                     </td>
                     <td className="px-4 py-3">
-                      <select
-                        value=""
-                        onChange={(e) => e.target.value && handleStatusChange(o.id, e.target.value)}
-                        className="text-xs border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-brand-400"
-                      >
-                        <option value="">Set status…</option>
-                        {statusOptions.map((s) => (
-                          <option key={s} value={s}>{s.replace(/([A-Z])/g, ' $1').trim()}</option>
-                        ))}
-                      </select>
+                      <div className="flex items-center gap-2">
+                        <select
+                          value=""
+                          onChange={(e) => e.target.value && handleStatusChange(o.id, e.target.value)}
+                          className="text-xs border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-brand-400"
+                        >
+                          <option value="">Set status…</option>
+                          {statusOptions.map((s) => (
+                            <option key={s} value={s}>{s.replace(/([A-Z])/g, ' $1').trim()}</option>
+                          ))}
+                        </select>
+                        {canDelete && (
+                          <button
+                            onClick={() => handleDelete(o.id)}
+                            className="text-xs text-red-500 hover:text-red-700"
+                            title="Delete this order"
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
                 {sortedOrders.length === 0 && (
-                  <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-400">No orders found.</td></tr>
+                  <tr><td colSpan={showCompany ? 9 : 8} className="px-4 py-8 text-center text-gray-400">No orders found.</td></tr>
                 )}
               </tbody>
             </table>
@@ -243,17 +314,62 @@ function OrdersTab() {
 
 // ---- Routes Tab ----
 
-function RoutesTab() {
+function RoutesTab({ showCompany, companyName }: CompanyDisplay) {
+  const { isRole } = useAuth()
+  const canDelete = isRole('Admin', 'SuperAdmin')
   const [date, setDate] = useState(format(new Date(), 'yyyy-MM-dd'))
   const [routes, setRoutes] = useState<Route[]>([])
   const [loading, setLoading] = useState(true)
+  // Accordion: collapsed by default so the day's grid of route cards
+  // stays scannable. Clicking a card header toggles its stops list.
+  // We track expanded ids rather than a single open-id so the operator
+  // can compare multiple routes side-by-side.
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
+
+  function toggleExpanded(id: string) {
+    setExpandedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
 
   useEffect(() => {
     setLoading(true)
     getRoutes(date)
       .then(setRoutes)
       .finally(() => setLoading(false))
+    // Reset accordion state when the date changes — the previous day's
+    // expanded IDs are stale for the new set of cards.
+    setExpandedIds(new Set())
   }, [date])
+
+  async function handleDeleteRoute(routeId: string) {
+    if (!confirm('Delete this route? Its orders will go back to Ordered so you can re-schedule them.')) return
+    const snapshot = routes
+    setRoutes((prev) => prev.filter((r) => r.id !== routeId))
+    try {
+      await deleteRoute(routeId)
+    } catch {
+      setRoutes(snapshot)
+      alert('Failed to delete route.')
+    }
+  }
+
+  // Sort key: primary by scheduledDepartTime ascending (Pickup at 08:00
+  // before ZonedDelivery at 09:22). Routes with no scheduledDepartTime
+  // (Legacy) sort to the end. Within the same depart time, RouteType
+  // priority puts Pickup first (so a warehouse run-out lands above any
+  // 08:00 DirectDelivery card sharing the slot).
+  function routeOrderKey(r: Route): number {
+    const ms = r.scheduledDepartTime ? new Date(r.scheduledDepartTime).getTime() : Number.MAX_SAFE_INTEGER
+    const typePriority =
+      r.routeType === 'Pickup'         ? 0 :
+      r.routeType === 'ZonedDelivery'  ? 1 :
+      r.routeType === 'DirectDelivery' ? 2 : 3
+    return ms * 4 + typePriority
+  }
 
   return (
     <div className="space-y-3">
@@ -273,59 +389,228 @@ function RoutesTab() {
         <div className="text-center py-12 text-gray-400">No routes for {date}.</div>
       ) : (
         <div className="space-y-4">
-          {routes.map((route) => (
+          {/* Order by ScheduledDepartTime so the Pickup van's card lands
+              ABOVE the ZonedDelivery cards (Pickup leaves the hub at the
+              window start; ZonedDelivery vans leave after pickup return +
+              sort wait). Legacy routes with no scheduledDepartTime sort
+              to the bottom — they predate the pickup → sort flow. */}
+          {[...routes]
+            .sort((a, b) => routeOrderKey(a) - routeOrderKey(b))
+            .map((route) => {
+            const isPickup    = route.routeType === 'Pickup'
+            const isDirect    = route.routeType === 'DirectDelivery'
+            const isZoned     = route.routeType === 'ZonedDelivery'
+            const headerTone  = isPickup ? 'bg-amber-50/60'
+                              : isDirect ? 'bg-emerald-50/60'
+                              : isZoned  ? 'bg-cyan-50/60'
+                              : 'bg-white'
+            const badgeTone   = isPickup ? 'bg-amber-100 text-amber-800'
+                              : isDirect ? 'bg-emerald-100 text-emerald-800'
+                              : isZoned  ? 'bg-cyan-100 text-cyan-800'
+                              : 'bg-gray-100 text-gray-600'
+            const badgeText   = isPickup ? 'PICKUP'
+                              : isDirect ? 'DIRECT DELIVERY · hub bypass'
+                              : isZoned  ? 'ZONED DELIVERY'
+                              : 'LEGACY'
+
+            const isExpanded = expandedIds.has(route.id)
+            return (
             <div key={route.id} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-              <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-                <div>
-                  <p className="font-semibold text-gray-900">{route.totalStops} stops</p>
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    {route.totalDistanceMiles.toFixed(1)} mi · {route.totalDuration}
-                    {route.isOptimized && <span className="ml-2 text-green-600 font-medium">Optimized</span>}
-                  </p>
+              {/* Header doubles as the accordion toggle. Click anywhere
+                  in the header (except the Delete button, which stops
+                  propagation) to expand / collapse the body. role="button"
+                  + tabIndex make it keyboard-reachable without nesting a
+                  real <button> around a Delete <button> (invalid HTML). */}
+              <div
+                role="button"
+                tabIndex={0}
+                aria-expanded={isExpanded}
+                onClick={() => toggleExpanded(route.id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    toggleExpanded(route.id)
+                  }
+                }}
+                className={`px-5 py-4 ${isExpanded ? 'border-b border-gray-100' : ''} flex items-center justify-between cursor-pointer select-none ${headerTone} hover:brightness-[0.98]`}
+              >
+                <div className="flex items-center gap-3 flex-1 min-w-0">
+                  <span
+                    aria-hidden="true"
+                    className={`text-gray-400 text-xs transition-transform duration-150 shrink-0 ${isExpanded ? 'rotate-90' : ''}`}
+                  >
+                    ▶
+                  </span>
+                  <div className="space-y-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide ${badgeTone}`}>
+                        {badgeText}
+                      </span>
+                      <p className="font-semibold text-gray-900">
+                        {isPickup ? 'Warehouse pickup' : `${route.totalStops} stops`}
+                      </p>
+                    </div>
+                    <p className="text-xs text-gray-500">
+                      {route.totalDistanceMiles.toFixed(1)} mi · {route.totalDuration}
+                      {route.isOptimized && <span className="ml-2 text-green-600 font-medium">Optimized</span>}
+                    </p>
+                    {(route.scheduledDepartTime || route.hubArrivalTime) && (
+                      <p className="text-xs font-medium text-gray-700">
+                        {route.scheduledDepartTime && (
+                          <>Depart {format(new Date(route.scheduledDepartTime), 'HH:mm')}</>
+                        )}
+                        {isPickup && route.hubArrivalTime && (
+                          <>{' '}→ Return to hub {format(new Date(route.hubArrivalTime), 'HH:mm')}</>
+                        )}
+                      </p>
+                    )}
+                  </div>
                 </div>
-                <div className="text-xs text-gray-400">{route.id.slice(0, 8)}</div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {showCompany && (
+                    <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-50 text-purple-700">
+                      {companyName(route.companyId)}
+                    </span>
+                  )}
+                  <div className="text-xs text-gray-400">{route.id.slice(0, 8)}</div>
+                  {/* Print → server-side iText itinerary PDF. Stops propagation
+                      so clicking it doesn't also toggle the accordion. */}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); printRouteItinerary(route.id).catch(() => alert('Failed to generate route itinerary PDF.')) }}
+                    className="text-gray-500 hover:text-brand-600 ml-1"
+                    title="Print this route's itinerary (PDF)"
+                    aria-label="Print itinerary"
+                  >
+                    🖨
+                  </button>
+                  {canDelete && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDeleteRoute(route.id) }}
+                      className="text-xs text-red-500 hover:text-red-700 ml-2"
+                      title="Delete this route and revert its orders to Ordered"
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
               </div>
+              {isExpanded && (
               <div className="divide-y divide-gray-50">
-                {/* Warehouse pickup is the route's pinned first physical stop —
-                    the driver loads product there before any delivery. */}
-                {route.warehousePickup && (
-                  <div className="px-5 py-3 flex items-center gap-4 bg-amber-50/40">
-                    <span className="w-7 h-7 rounded-md bg-amber-500 text-white text-[10px] font-bold flex items-center justify-center uppercase tracking-wide shrink-0">
-                      W
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-semibold text-amber-700 truncate">
-                        Pickup · {route.warehousePickup.name}
-                      </p>
-                      <p className="text-xs text-gray-500 truncate">{route.warehousePickup.address}</p>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <p className="text-xs font-medium text-gray-700">
-                        {route.warehousePickup.estimatedArrival ? format(new Date(route.warehousePickup.estimatedArrival), 'HH:mm') : '—'}
-                      </p>
-                    </div>
-                  </div>
+                {/* Pickup-only body: three labelled rows (hub depart →
+                    warehouse load → hub return) so the operator can see
+                    times for every leg of the round trip. Mirrors the
+                    delivery-card row style. Warehouse-load is a 50/50
+                    midpoint estimate because we only persist the round
+                    trip's total duration today; in practice outbound and
+                    inbound legs are symmetric enough for the operator
+                    view. Real per-leg times would require splitting
+                    OutboundDurationSeconds / InboundDurationSeconds onto
+                    the route entity. */}
+                {isPickup ? (() => {
+                  const departIso = route.scheduledDepartTime
+                  const arriveIso = route.hubArrivalTime
+                  let midDate: Date | null = null
+                  if (departIso && arriveIso) {
+                    const d = new Date(departIso).getTime()
+                    const a = new Date(arriveIso).getTime()
+                    if (Number.isFinite(d) && Number.isFinite(a) && a > d) {
+                      midDate = new Date((d + a) / 2)
+                    }
+                  }
+                  const fmt = (iso?: string | null, fallback = '—') =>
+                    iso ? format(new Date(iso), 'HH:mm') : fallback
+                  return (
+                    <>
+                      <div className="px-5 py-3 flex items-center gap-4">
+                        <span className="w-7 h-7 rounded-md bg-amber-500 text-white text-[10px] font-bold flex items-center justify-center uppercase tracking-wide shrink-0">H</span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-gray-900 truncate">Hub — depart</p>
+                          <p className="text-xs text-gray-500 truncate">{route.startAddress}</p>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-xs font-medium text-gray-700">{fmt(departIso)}</p>
+                          <p className="text-[10px] text-gray-400">leave</p>
+                        </div>
+                      </div>
+                      <div className="px-5 py-3 flex items-center gap-4 bg-amber-50/40">
+                        <span className="w-7 h-7 rounded-md bg-amber-500 text-white text-[10px] font-bold flex items-center justify-center uppercase tracking-wide shrink-0">W</span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold text-amber-700 truncate">
+                            {route.warehousePickup?.name ?? 'Warehouse'}
+                          </p>
+                          {route.warehousePickup?.address && (
+                            <p className="text-xs text-gray-500 truncate">{route.warehousePickup.address}</p>
+                          )}
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-xs font-medium text-gray-700">
+                            {midDate ? format(midDate, 'HH:mm') : '—'}
+                          </p>
+                          <p className="text-[10px] text-gray-400">load (est.)</p>
+                        </div>
+                      </div>
+                      <div className="px-5 py-3 flex items-center gap-4">
+                        <span className="w-7 h-7 rounded-md bg-amber-500 text-white text-[10px] font-bold flex items-center justify-center uppercase tracking-wide shrink-0">H</span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-gray-900 truncate">Hub — return</p>
+                          <p className="text-xs text-gray-500 truncate">{route.endAddress}</p>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-xs font-medium text-gray-700">{fmt(arriveIso)}</p>
+                          <p className="text-[10px] text-gray-400">arrive</p>
+                        </div>
+                      </div>
+                      <div className="px-5 py-2 text-[11px] text-gray-400 italic">
+                        Cargo for every paired ZonedDelivery van on this date. Sort begins when this van returns.
+                      </div>
+                    </>
+                  )
+                })() : (
+                  <>
+                    {/* Warehouse pickup is the route's pinned first physical stop —
+                        the driver loads product there before any delivery. */}
+                    {route.warehousePickup && (
+                      <div className="px-5 py-3 flex items-center gap-4 bg-amber-50/40">
+                        <span className="w-7 h-7 rounded-md bg-amber-500 text-white text-[10px] font-bold flex items-center justify-center uppercase tracking-wide shrink-0">
+                          W
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold text-amber-700 truncate">
+                            Pickup · {route.warehousePickup.name}
+                          </p>
+                          <p className="text-xs text-gray-500 truncate">{route.warehousePickup.address}</p>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-xs font-medium text-gray-700">
+                            {route.warehousePickup.estimatedArrival ? format(new Date(route.warehousePickup.estimatedArrival), 'HH:mm') : '—'}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                    {route.stops.map((stop) => (
+                      <div key={stop.orderId} className="px-5 py-3 flex items-center gap-4">
+                        <span className="w-7 h-7 rounded-full bg-brand-100 text-brand-700 text-xs font-bold flex items-center justify-center shrink-0">
+                          {stop.sequence}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-gray-900 truncate">{stop.storeName}</p>
+                          <p className="text-xs text-gray-500 truncate">{stop.address}</p>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-xs font-medium text-gray-700">
+                            {stop.estimatedArrival ? format(new Date(stop.estimatedArrival), 'HH:mm') : '—'}
+                          </p>
+                          <StatusBadge status={stop.confirmationStatus} />
+                        </div>
+                      </div>
+                    ))}
+                  </>
                 )}
-                {route.stops.map((stop) => (
-                  <div key={stop.orderId} className="px-5 py-3 flex items-center gap-4">
-                    <span className="w-7 h-7 rounded-full bg-brand-100 text-brand-700 text-xs font-bold flex items-center justify-center shrink-0">
-                      {stop.sequence}
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-900 truncate">{stop.storeName}</p>
-                      <p className="text-xs text-gray-500 truncate">{stop.address}</p>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <p className="text-xs font-medium text-gray-700">
-                        {stop.estimatedArrival ? format(new Date(stop.estimatedArrival), 'HH:mm') : '—'}
-                      </p>
-                      <StatusBadge status={stop.confirmationStatus} />
-                    </div>
-                  </div>
-                ))}
               </div>
+              )}
             </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>
@@ -334,7 +619,7 @@ function RoutesTab() {
 
 // ---- Users Tab ----
 
-function UsersTab() {
+function UsersTab({ showCompany, companyName }: CompanyDisplay) {
   const { isRole } = useAuth()
   const [users, setUsers] = useState<AppUser[]>([])
   const [warehouses, setWarehouses] = useState<Warehouse[]>([])
@@ -351,6 +636,7 @@ function UsersTab() {
     accessors: {
       roles:    (u) => u.roles.join(', '),
       isActive: (u) => u.isActive,
+      company:  (u) => companyName(u.companyId),
     },
   })
 
@@ -519,6 +805,9 @@ function UsersTab() {
                 <SortHeader label="Name"       sortKey="fullName"    activeKey={sortKey} dir={sortDir} onClick={() => toggle('fullName')} />
                 <SortHeader label="Email"      sortKey="email"       activeKey={sortKey} dir={sortDir} onClick={() => toggle('email')} />
                 <SortHeader label="Roles"      sortKey="roles"       activeKey={sortKey} dir={sortDir} onClick={() => toggle('roles')} />
+                {showCompany && (
+                  <SortHeader label="Company"  sortKey="company"     activeKey={sortKey} dir={sortDir} onClick={() => toggle('company')} />
+                )}
                 <th className="px-4 py-3 text-left font-medium">Warehouse</th>
                 <SortHeader label="Last Login" sortKey="lastLoginAt" activeKey={sortKey} dir={sortDir} onClick={() => toggle('lastLoginAt')} />
                 <SortHeader label="Status"     sortKey="isActive"    activeKey={sortKey} dir={sortDir} onClick={() => toggle('isActive')} />
@@ -537,6 +826,9 @@ function UsersTab() {
                       ))}
                     </div>
                   </td>
+                  {showCompany && (
+                    <td className="px-4 py-3 text-gray-500 text-xs">{companyName(u.companyId)}</td>
+                  )}
                   <td className="px-4 py-3 text-gray-500 text-xs">
                     {u.assignedWarehouseId
                       ? (warehousesById.get(u.assignedWarehouseId)?.businessName ?? '—')
@@ -559,7 +851,7 @@ function UsersTab() {
                 </tr>
               ))}
               {sortedUsers.length === 0 && (
-                <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-400">No users found.</td></tr>
+                <tr><td colSpan={showCompany ? 8 : 7} className="px-4 py-8 text-center text-gray-400">No users found.</td></tr>
               )}
             </tbody>
           </table>
@@ -571,15 +863,21 @@ function UsersTab() {
 
 // ---- Hubs Tab ----
 
-function HubsTab() {
+function HubsTab({ showCompany, companyName }: CompanyDisplay) {
   const [hubs, setHubs] = useState<Hub[]>([])
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<string | 'new' | null>(null)
-  const [form, setForm] = useState({ name: '', address: '', city: '', state: '', zip: '' })
+  // 30 mirrors the entity default; the input shows blank if a sort wait was
+  // never set, but we round-trip it through state as a string to keep the
+  // number-input controlled cleanly (empty string vs NaN).
+  const [form, setForm] = useState({ name: '', address: '', city: '', state: '', zip: '', sortingWaitMinutes: '30' })
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
   const { sorted: sortedHubs, sortKey, sortDir, toggle } = useSortedRows(hubs, {
-    accessors: { address: (h) => `${h.address}, ${h.city}, ${h.state} ${h.zip}` },
+    accessors: {
+      address: (h) => `${h.address}, ${h.city}, ${h.state} ${h.zip}`,
+      company: (h) => companyName(h.companyId),
+    },
   })
 
   useEffect(() => {
@@ -587,25 +885,36 @@ function HubsTab() {
   }, [])
 
   function startCreate() {
-    setForm({ name: '', address: '', city: '', state: '', zip: '' })
+    setForm({ name: '', address: '', city: '', state: '', zip: '', sortingWaitMinutes: '30' })
     setEditing('new')
     setFormError('')
   }
 
   function startEdit(h: Hub) {
-    setForm({ name: h.name, address: h.address, city: h.city, state: h.state, zip: h.zip })
+    setForm({
+      name: h.name, address: h.address, city: h.city, state: h.state, zip: h.zip,
+      sortingWaitMinutes: String(h.sortingWaitMinutes ?? 30),
+    })
     setEditing(h.id)
     setFormError('')
   }
 
   async function handleSave() {
     if (!form.name || !form.address) { setFormError('Name and Address are required.'); return }
+    const waitParsed = parseInt(form.sortingWaitMinutes, 10)
+    if (Number.isNaN(waitParsed) || waitParsed < 0 || waitParsed > 240) {
+      setFormError('Sorting Wait must be a number between 0 and 240 minutes.'); return
+    }
     setSaving(true); setFormError('')
     try {
+      const payload = {
+        name: form.name, address: form.address, city: form.city, state: form.state, zip: form.zip,
+        sortingWaitMinutes: waitParsed,
+      }
       if (editing === 'new') {
-        await createHub(form)
+        await createHub(payload)
       } else {
-        await updateHub(editing!, form)
+        await updateHub(editing!, payload)
       }
       setHubs(await getHubs())
       setEditing(null)
@@ -644,6 +953,20 @@ function HubsTab() {
               <Field label="State" value={form.state} onChange={(v) => setForm({ ...form, state: v })} />
               <Field label="ZIP" value={form.zip} onChange={(v) => setForm({ ...form, zip: v })} />
             </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Sorting Wait (minutes)</label>
+              <input
+                type="number"
+                min={0}
+                max={240}
+                value={form.sortingWaitMinutes}
+                onChange={(e) => setForm({ ...form, sortingWaitMinutes: e.target.value })}
+                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400"
+              />
+              <p className="text-[11px] text-gray-400 mt-1">
+                Minutes between a pickup van's arrival here and per-zone delivery vans dispatching. 0–240.
+              </p>
+            </div>
           </div>
           {formError && <p className="text-sm text-red-600">{formError}</p>}
           <div className="flex gap-2">
@@ -661,16 +984,24 @@ function HubsTab() {
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
             <tr>
-              <SortHeader label="Name"    sortKey="name"    activeKey={sortKey} dir={sortDir} onClick={() => toggle('name')} />
-              <SortHeader label="Address" sortKey="address" activeKey={sortKey} dir={sortDir} onClick={() => toggle('address')} />
+              {showCompany && (
+                <SortHeader label="Company" sortKey="company" activeKey={sortKey} dir={sortDir} onClick={() => toggle('company')} />
+              )}
+              <SortHeader label="Name"      sortKey="name"               activeKey={sortKey} dir={sortDir} onClick={() => toggle('name')} />
+              <SortHeader label="Address"   sortKey="address"            activeKey={sortKey} dir={sortDir} onClick={() => toggle('address')} />
+              <SortHeader label="Sort Wait" sortKey="sortingWaitMinutes" activeKey={sortKey} dir={sortDir} onClick={() => toggle('sortingWaitMinutes')} />
               <th className="px-4 py-3 text-left font-medium"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {sortedHubs.map((h) => (
               <tr key={h.id} className="hover:bg-gray-50">
+                {showCompany && (
+                  <td className="px-4 py-3 text-gray-500 text-xs">{companyName(h.companyId)}</td>
+                )}
                 <td className="px-4 py-3 font-medium text-gray-900">{h.name}</td>
                 <td className="px-4 py-3 text-gray-600">{h.address}, {h.city} {h.state} {h.zip}</td>
+                <td className="px-4 py-3 text-gray-600">{h.sortingWaitMinutes} min</td>
                 <td className="px-4 py-3">
                   <div className="flex gap-2">
                     <button onClick={() => startEdit(h)} className="text-xs text-brand-600 hover:text-brand-800">Edit</button>
@@ -680,7 +1011,7 @@ function HubsTab() {
               </tr>
             ))}
             {sortedHubs.length === 0 && (
-              <tr><td colSpan={3} className="px-4 py-8 text-center text-gray-400">No hubs found.</td></tr>
+              <tr><td colSpan={showCompany ? 5 : 4} className="px-4 py-8 text-center text-gray-400">No hubs found.</td></tr>
             )}
           </tbody>
         </table>
@@ -691,7 +1022,7 @@ function HubsTab() {
 
 // ---- Vans Tab ----
 
-function VansTab() {
+function VansTab({ showCompany, companyName }: CompanyDisplay) {
   const [trucks, setTrucks] = useState<Truck[]>([])
   const [hubs, setHubs] = useState<Hub[]>([])
   const [loading, setLoading] = useState(true)
@@ -699,7 +1030,9 @@ function VansTab() {
   const [form, setForm] = useState({ name: '', licensePlate: '', hubId: '', currentLocationAddress: '' })
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
-  const { sorted: sortedTrucks, sortKey, sortDir, toggle } = useSortedRows(trucks)
+  const { sorted: sortedTrucks, sortKey, sortDir, toggle } = useSortedRows(trucks, {
+    accessors: { company: (t) => companyName(t.companyId) },
+  })
 
   useEffect(() => {
     Promise.all([getTrucks(), getHubs()])
@@ -821,6 +1154,9 @@ function VansTab() {
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
             <tr>
+              {showCompany && (
+                <SortHeader label="Company"        sortKey="company"                activeKey={sortKey} dir={sortDir} onClick={() => toggle('company')} />
+              )}
               <SortHeader label="Vehicle"          sortKey="name"                   activeKey={sortKey} dir={sortDir} onClick={() => toggle('name')} />
               <SortHeader label="License Plate"    sortKey="licensePlate"           activeKey={sortKey} dir={sortDir} onClick={() => toggle('licensePlate')} />
               <SortHeader label="Hub"              sortKey="hubName"                activeKey={sortKey} dir={sortDir} onClick={() => toggle('hubName')} />
@@ -832,6 +1168,9 @@ function VansTab() {
           <tbody className="divide-y divide-gray-100">
             {sortedTrucks.map((t) => (
               <tr key={t.id} className="hover:bg-gray-50">
+                {showCompany && (
+                  <td className="px-4 py-3 text-gray-500 text-xs">{companyName(t.companyId)}</td>
+                )}
                 <td className="px-4 py-3 font-medium text-gray-900">{t.name}</td>
                 <td className="px-4 py-3 text-gray-600">{t.licensePlate ?? '---'}</td>
                 <td className="px-4 py-3">
@@ -859,7 +1198,7 @@ function VansTab() {
               </tr>
             ))}
             {sortedTrucks.length === 0 && (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-400">No vans found.</td></tr>
+              <tr><td colSpan={showCompany ? 7 : 6} className="px-4 py-8 text-center text-gray-400">No vans found.</td></tr>
             )}
           </tbody>
         </table>
@@ -902,6 +1241,280 @@ function TruckStatusSelect({ value, onChange }: {
   )
 }
 
+// ---- Stores Tab ----
+
+function StoresTab({ showCompany }: CompanyDisplay) {
+  const { isRole } = useAuth()
+  // Stores are shared master data (one Store row can belong to multiple
+  // companies via the StoreCompanies join), so only Global Administrators
+  // (SuperAdmin) get the Edit button. Tenant Admins / Logistics see the
+  // table read-only — same gate as the backend PUT /api/stores/{id}.
+  const canEdit = isRole('SuperAdmin')
+
+  const [stores, setStores] = useState<StoreLite[]>([])
+  const [loading, setLoading] = useState(true)
+  const [search, setSearch] = useState('')
+  const [editing, setEditing] = useState<StoreLite | null>(null)
+  const { sorted: sortedStores, sortKey, sortDir, toggle } = useSortedRows(stores, {
+    accessors: {
+      zone:     (s) => s.zone     ?? '',
+      district: (s) => s.district ?? '',
+      // Stores are many-to-many with Companies; sort key is the joined list.
+      company:  (s) => (s.companies ?? []).map((c) => c.name).join(', '),
+    },
+  })
+
+  useEffect(() => {
+    getStores().then(setStores).finally(() => setLoading(false))
+  }, [])
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return sortedStores
+    return sortedStores.filter((s) =>
+      s.name.toLowerCase().includes(q)
+      || s.licenseNumber.toLowerCase().includes(q)
+      || s.customer.toLowerCase().includes(q)
+      || s.city.toLowerCase().includes(q)
+      || (s.zone     ?? '').toLowerCase().includes(q)
+      || (s.district ?? '').toLowerCase().includes(q)
+      || (showCompany ? (s.companies ?? []).some((c) => c.name.toLowerCase().includes(q)) : false),
+    )
+  }, [sortedStores, search, showCompany])
+
+  const zoned = stores.filter((s) => s.zone).length
+
+  // Refresh the row in local state after a save so the operator sees their
+  // edit immediately, without a full list re-fetch.
+  function applyLocalUpdate(id: string, patch: UpdateStorePayload) {
+    setStores((prev) => prev.map((s) => s.id !== id ? s : {
+      ...s,
+      ...(patch.name          !== undefined ? { name:          patch.name }          : {}),
+      ...(patch.licenseNumber !== undefined ? { licenseNumber: patch.licenseNumber } : {}),
+      ...(patch.customer      !== undefined ? { customer:      patch.customer }      : {}),
+      ...(patch.address       !== undefined ? { address:       patch.address }       : {}),
+      ...(patch.city          !== undefined ? { city:          patch.city }          : {}),
+      ...(patch.state         !== undefined ? { state:         patch.state }         : {}),
+      ...(patch.zip           !== undefined ? { zip:           patch.zip }           : {}),
+      ...(patch.county        !== undefined ? { county:        patch.county }        : {}),
+      ...(patch.email         !== undefined ? { email:         patch.email }         : {}),
+      ...(patch.phone         !== undefined ? { phone:         patch.phone }         : {}),
+      ...(patch.isActive      !== undefined ? { isActive:      patch.isActive }      : {}),
+    }))
+  }
+
+  if (loading) return <div className="flex items-center justify-center h-40 text-gray-400">Loading...</div>
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-3">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Filter by name, license, customer, city, zone…"
+          className="flex-1 max-w-md px-3 py-1.5 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400"
+        />
+        <span className="text-xs text-gray-500">
+          {filtered.length} of {stores.length} · {zoned} zoned
+        </span>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
+              <tr>
+                {showCompany && (
+                  <SortHeader label="Company" sortKey="company"       activeKey={sortKey} dir={sortDir} onClick={() => toggle('company')} />
+                )}
+                <SortHeader label="Name"      sortKey="name"          activeKey={sortKey} dir={sortDir} onClick={() => toggle('name')} />
+                <SortHeader label="License #" sortKey="licenseNumber" activeKey={sortKey} dir={sortDir} onClick={() => toggle('licenseNumber')} />
+                <SortHeader label="Customer"  sortKey="customer"      activeKey={sortKey} dir={sortDir} onClick={() => toggle('customer')} />
+                <SortHeader label="City"      sortKey="city"          activeKey={sortKey} dir={sortDir} onClick={() => toggle('city')} />
+                <SortHeader label="Zone"      sortKey="zone"          activeKey={sortKey} dir={sortDir} onClick={() => toggle('zone')} />
+                <SortHeader label="District"  sortKey="district"      activeKey={sortKey} dir={sortDir} onClick={() => toggle('district')} />
+                {canEdit && <th className="px-4 py-3 text-left font-medium"></th>}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {filtered.map((s) => (
+                <tr key={s.id} className="hover:bg-gray-50">
+                  {showCompany && (
+                    <td className="px-4 py-3">
+                      <div className="flex flex-wrap gap-1">
+                        {(s.companies ?? []).map((c) => (
+                          <span key={c.id} className="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-50 text-purple-700">{c.name}</span>
+                        ))}
+                        {(s.companies ?? []).length === 0 && <span className="text-xs text-gray-400">—</span>}
+                      </div>
+                    </td>
+                  )}
+                  <td className="px-4 py-3 font-medium text-gray-900">{s.name}</td>
+                  <td className="px-4 py-3 text-gray-600 font-mono text-xs">{s.licenseNumber}</td>
+                  <td className="px-4 py-3 text-gray-600">{s.customer}</td>
+                  <td className="px-4 py-3 text-gray-600">{s.city}</td>
+                  <td className="px-4 py-3">
+                    {s.zone
+                      ? <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-brand-50 text-brand-700">{s.zone}</span>
+                      : <span className="text-xs text-gray-400">Unzoned</span>}
+                  </td>
+                  <td className="px-4 py-3 text-gray-500 text-xs">{s.district ?? '—'}</td>
+                  {canEdit && (
+                    <td className="px-4 py-3">
+                      <button
+                        onClick={() => setEditing(s)}
+                        className="text-xs text-brand-600 hover:text-brand-800"
+                        title="Edit this store"
+                      >
+                        Edit
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              ))}
+              {filtered.length === 0 && (
+                <tr><td colSpan={(showCompany ? 7 : 6) + (canEdit ? 1 : 0)} className="px-4 py-8 text-center text-gray-400">
+                  {stores.length === 0 ? 'No stores found.' : 'No stores match the current filter.'}
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {editing && (
+        <EditStoreDialog
+          store={editing}
+          onCancel={() => setEditing(null)}
+          onSaved={(patch) => {
+            applyLocalUpdate(editing.id, patch)
+            setEditing(null)
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+// ---- Edit Store Dialog ----
+// Light modal that pre-fills from the selected row and PATCH-sends the
+// whole form on save. Address fields are split out so the operator can
+// fix typo'd street / city / zip without retyping the rest. Toggling
+// "Active" off soft-deactivates the row server-side.
+
+function EditStoreDialog({
+  store,
+  onCancel,
+  onSaved,
+}: {
+  store: StoreLite
+  onCancel: () => void
+  onSaved: (patch: UpdateStorePayload) => void
+}) {
+  const [form, setForm] = useState({
+    name:          store.name,
+    licenseNumber: store.licenseNumber,
+    customer:      store.customer ?? '',
+    address:       store.address  ?? '',
+    city:          store.city     ?? '',
+    state:         store.state    ?? 'IL',
+    zip:           store.zip      ?? '',
+    county:        store.county   ?? '',
+    email:         store.email    ?? '',
+    phone:         store.phone    ?? '',
+    isActive:      store.isActive ?? true,
+  })
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleSave() {
+    if (!form.name.trim() || !form.licenseNumber.trim() || !form.address.trim()) {
+      setError('Name, License Number, and Address are required.')
+      return
+    }
+    setSaving(true)
+    setError('')
+    try {
+      const payload: UpdateStorePayload = {
+        name:          form.name.trim(),
+        licenseNumber: form.licenseNumber.trim(),
+        customer:      form.customer.trim(),
+        address:       form.address.trim(),
+        city:          form.city.trim(),
+        state:         form.state.trim(),
+        zip:           form.zip.trim(),
+        county:        form.county.trim(),
+        email:         form.email.trim(),
+        phone:         form.phone.trim(),
+        isActive:      form.isActive,
+      }
+      await updateStore(store.id, payload)
+      onSaved(payload)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to save store.'
+      setError(msg)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+        <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-gray-900">Edit Store</h2>
+          <button onClick={onCancel} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
+        </div>
+        <div className="p-5 space-y-4">
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Name *"          value={form.name}          onChange={(v) => setForm({ ...form, name: v })} />
+            <Field label="License Number *" value={form.licenseNumber} onChange={(v) => setForm({ ...form, licenseNumber: v })} />
+            <Field label="Customer"        value={form.customer}      onChange={(v) => setForm({ ...form, customer: v })} />
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Status</label>
+              <select
+                value={form.isActive ? 'active' : 'inactive'}
+                onChange={(e) => setForm({ ...form, isActive: e.target.value === 'active' })}
+                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400"
+              >
+                <option value="active">Active</option>
+                <option value="inactive">Inactive</option>
+              </select>
+            </div>
+            <div className="col-span-2">
+              <Field label="Address *" value={form.address} onChange={(v) => setForm({ ...form, address: v })} />
+              <p className="text-[11px] text-gray-400 mt-1">
+                Address changes drop the cached geocode — the next routing run re-resolves the coords.
+              </p>
+            </div>
+            <Field label="City"   value={form.city}   onChange={(v) => setForm({ ...form, city: v })} />
+            <Field label="County" value={form.county} onChange={(v) => setForm({ ...form, county: v })} />
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="State" value={form.state} onChange={(v) => setForm({ ...form, state: v })} />
+              <Field label="ZIP"   value={form.zip}   onChange={(v) => setForm({ ...form, zip: v })} />
+            </div>
+            <Field label="Email" value={form.email} onChange={(v) => setForm({ ...form, email: v })} />
+            <Field label="Phone" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} />
+          </div>
+
+          {error && <p className="text-sm text-red-600">{error}</p>}
+        </div>
+        <div className="px-5 py-4 border-t border-gray-100 flex gap-2 justify-end">
+          <button onClick={onCancel} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900">Cancel</button>
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="px-4 py-2 bg-brand-500 text-white text-sm font-medium rounded-lg hover:bg-brand-600 disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ---- Warehouses Tab ----
 
 const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const
@@ -916,6 +1529,9 @@ type WarehouseForm = {
   zip: string
   licenseNumber: string
   legacyLicenseNumber: string
+  // String-typed so the controlled number input stays clean (no
+  // NaN-vs-empty headaches). Validated on save.
+  loadingWaitMinutes: string
   mondayPickupTime: string
   tuesdayPickupTime: string
   wednesdayPickupTime: string
@@ -928,11 +1544,12 @@ type WarehouseForm = {
 const emptyWarehouseForm: WarehouseForm = {
   businessName: '', alternateName: '', address: '', city: '', state: '', zip: '',
   licenseNumber: '', legacyLicenseNumber: '',
+  loadingWaitMinutes: '15',
   mondayPickupTime: '', tuesdayPickupTime: '', wednesdayPickupTime: '',
   thursdayPickupTime: '', fridayPickupTime: '', saturdayPickupTime: '', sundayPickupTime: '',
 }
 
-function WarehousesTab() {
+function WarehousesTab({ showCompany }: CompanyDisplay) {
   const [warehouses, setWarehouses] = useState<Warehouse[]>([])
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<string | 'new' | null>(null)
@@ -942,6 +1559,8 @@ function WarehousesTab() {
   const { sorted: sortedWarehouses, sortKey, sortDir, toggle } = useSortedRows(warehouses, {
     accessors: {
       address:        (w) => `${w.address}, ${w.city}, ${w.state} ${w.zip}`,
+      // Warehouses are many-to-many with Companies; sort key is the joined list.
+      company:        (w) => (w.companies ?? []).map((c) => c.name).join(', '),
       pickupSchedule: (w) => [
         w.mondayPickupTime, w.tuesdayPickupTime, w.wednesdayPickupTime, w.thursdayPickupTime,
         w.fridayPickupTime, w.saturdayPickupTime, w.sundayPickupTime,
@@ -969,6 +1588,7 @@ function WarehousesTab() {
       zip: w.zip,
       licenseNumber: w.licenseNumber ?? '',
       legacyLicenseNumber: w.legacyLicenseNumber ?? '',
+      loadingWaitMinutes: String(w.loadingWaitMinutes ?? 15),
       mondayPickupTime: w.mondayPickupTime ?? '',
       tuesdayPickupTime: w.tuesdayPickupTime ?? '',
       wednesdayPickupTime: w.wednesdayPickupTime ?? '',
@@ -983,13 +1603,21 @@ function WarehousesTab() {
 
   async function handleSave() {
     if (!form.businessName || !form.address) { setFormError('Business Name and Address are required.'); return }
+    const waitParsed = parseInt(form.loadingWaitMinutes, 10)
+    if (Number.isNaN(waitParsed) || waitParsed < 0 || waitParsed > 240) {
+      setFormError('Loading Wait must be a number between 0 and 240 minutes.'); return
+    }
     setSaving(true)
     setFormError('')
     try {
+      // Coerce the string-typed loadingWaitMinutes field to a number
+      // before sending — the rest of the form stays strings (the backend
+      // accepts the address fields and pickup times as strings either way).
+      const payload: Partial<Warehouse> = { ...form, loadingWaitMinutes: waitParsed }
       if (editing === 'new') {
-        await createWarehouse(form as Partial<Warehouse>)
+        await createWarehouse(payload)
       } else {
-        await updateWarehouse(editing!, form)
+        await updateWarehouse(editing!, payload)
       }
       const updated = await getWarehouses()
       setWarehouses(updated)
@@ -1032,6 +1660,20 @@ function WarehousesTab() {
             <Field label="Alternate Name" value={form.alternateName} onChange={(v) => updateField('alternateName', v)} />
             <Field label="License Number" value={form.licenseNumber} onChange={(v) => updateField('licenseNumber', v)} />
             <Field label="Legacy License #" value={form.legacyLicenseNumber} onChange={(v) => updateField('legacyLicenseNumber', v)} />
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Loading Wait (minutes)</label>
+              <input
+                type="number"
+                min={0}
+                max={240}
+                value={form.loadingWaitMinutes}
+                onChange={(e) => updateField('loadingWaitMinutes', e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400"
+              />
+              <p className="text-[11px] text-gray-400 mt-1">
+                Minutes the van waits at this warehouse for loading. Applied to pickup round trips and any DirectDelivery / Legacy route that visits here. 0–240.
+              </p>
+            </div>
           </div>
 
           {/* Address */}
@@ -1089,6 +1731,9 @@ function WarehousesTab() {
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
             <tr>
+              {showCompany && (
+                <SortHeader label="Company"       sortKey="company"        activeKey={sortKey} dir={sortDir} onClick={() => toggle('company')} />
+              )}
               <SortHeader label="Business Name"   sortKey="businessName"   activeKey={sortKey} dir={sortDir} onClick={() => toggle('businessName')} />
               <SortHeader label="Address"         sortKey="address"        activeKey={sortKey} dir={sortDir} onClick={() => toggle('address')} />
               <SortHeader label="License #"       sortKey="licenseNumber"  activeKey={sortKey} dir={sortDir} onClick={() => toggle('licenseNumber')} />
@@ -1099,6 +1744,16 @@ function WarehousesTab() {
           <tbody className="divide-y divide-gray-100">
             {sortedWarehouses.map((w) => (
               <tr key={w.id} className="hover:bg-gray-50">
+                {showCompany && (
+                  <td className="px-4 py-3">
+                    <div className="flex flex-wrap gap-1">
+                      {(w.companies ?? []).map((c) => (
+                        <span key={c.id} className="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-50 text-purple-700">{c.name}</span>
+                      ))}
+                      {(w.companies ?? []).length === 0 && <span className="text-xs text-gray-400">—</span>}
+                    </div>
+                  </td>
+                )}
                 <td className="px-4 py-3">
                   <p className="font-medium text-gray-900">{w.businessName}</p>
                   {w.alternateName && <p className="text-xs text-gray-400">{w.alternateName}</p>}
@@ -1130,7 +1785,7 @@ function WarehousesTab() {
               </tr>
             ))}
             {sortedWarehouses.length === 0 && (
-              <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-400">No warehouses found.</td></tr>
+              <tr><td colSpan={showCompany ? 6 : 5} className="px-4 py-8 text-center text-gray-400">No warehouses found.</td></tr>
             )}
           </tbody>
         </table>
@@ -1170,5 +1825,143 @@ function StatusBadge({ status }: { status: string }) {
     <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${styles[status] ?? 'bg-gray-100 text-gray-500'}`}>
       {status.replace(/([A-Z])/g, ' $1').trim()}
     </span>
+  )
+}
+
+// ---- Optimization Audit Tab ----
+//
+// One row per RouteScheduler invocation. The list shows summary stats per
+// run; clicking a row expands into a monospace viewer for the full audit
+// trail (every step the scheduler took and why). The "Download PDF" button
+// invokes the server-side iText generator (see PdfService.BuildAuditPdf)
+// rather than building the PDF in-browser — keeps the rendering consistent
+// with the route itinerary PDFs and avoids carrying jsPDF in the bundle.
+
+function OptimizationAuditsTab() {
+  const [audits, setAudits] = useState<OptimizationAuditSummary[]>([])
+  const [loading, setLoading] = useState(true)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [detail, setDetail] = useState<OptimizationAuditDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [downloading, setDownloading]   = useState(false)
+
+  useEffect(() => {
+    getOptimizationAudits().then(setAudits).finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => {
+    if (!selectedId) { setDetail(null); return }
+    setDetailLoading(true)
+    setDetail(null)
+    getOptimizationAudit(selectedId)
+      .then(setDetail)
+      .finally(() => setDetailLoading(false))
+  }, [selectedId])
+
+  async function downloadPdf(d: OptimizationAuditDetail) {
+    setDownloading(true)
+    try {
+      await printOptimizationAudit(d.id)
+    } catch {
+      alert('Failed to download audit PDF.')
+    } finally {
+      setDownloading(false)
+    }
+  }
+
+  if (loading) return <div className="flex items-center justify-center h-40 text-gray-400">Loading...</div>
+
+  return (
+    <div className="space-y-4">
+      <div className="text-sm text-gray-500">
+        Each row is one optimization run. The detail view explains every decision the route
+        scheduler made — warehouses involved, hubs picked, chunks formed, hub-bypass exceptions.
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
+            <tr>
+              <th className="px-4 py-3 text-left font-medium">When</th>
+              <th className="px-4 py-3 text-left font-medium">Trigger</th>
+              <th className="px-4 py-3 text-left font-medium">By</th>
+              <th className="px-4 py-3 text-right font-medium">Orders</th>
+              <th className="px-4 py-3 text-right font-medium">Routes</th>
+              <th className="px-4 py-3 text-right font-medium">Warehouses</th>
+              <th className="px-4 py-3 text-right font-medium">Zones</th>
+              <th className="px-4 py-3 text-right font-medium">Bypass</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {audits.map((a) => (
+              <tr
+                key={a.id}
+                onClick={() => setSelectedId(a.id === selectedId ? null : a.id)}
+                className={`hover:bg-gray-50 cursor-pointer ${selectedId === a.id ? 'bg-brand-50/40' : ''}`}
+              >
+                <td className="px-4 py-3 text-gray-700">{format(new Date(a.createdAt), 'MMM dd HH:mm:ss')}</td>
+                <td className="px-4 py-3 text-gray-700">{a.trigger}</td>
+                <td className="px-4 py-3 text-gray-500 text-xs">{a.triggeredBy ?? <em className="text-gray-400">(system)</em>}</td>
+                <td className="px-4 py-3 text-right text-gray-600">{a.orderCount}</td>
+                <td className="px-4 py-3 text-right text-gray-600">{a.routeCount}</td>
+                <td className="px-4 py-3 text-right text-gray-600">{a.warehouseCount}</td>
+                <td className="px-4 py-3 text-right text-gray-600">{a.zoneCount}</td>
+                <td className="px-4 py-3 text-right">
+                  {a.directDeliveryCount > 0
+                    ? <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700">{a.directDeliveryCount}</span>
+                    : <span className="text-gray-300 text-xs">—</span>}
+                </td>
+              </tr>
+            ))}
+            {audits.length === 0 && (
+              <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-400">
+                No optimization runs yet. They appear here after the first time you bulk-Schedule or import with Scheduled status.
+              </td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {selectedId && (
+        <div className="bg-white rounded-xl border border-gray-200">
+          <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-800">Audit detail</h3>
+              {detail && (
+                <p className="text-xs text-gray-500 mt-0.5">{detail.summary}</p>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {detail && (
+                <button
+                  onClick={() => downloadPdf(detail)}
+                  disabled={downloading}
+                  className="px-3 py-1.5 bg-brand-500 text-white text-xs font-medium rounded-md hover:bg-brand-600 disabled:opacity-50"
+                >
+                  {downloading ? 'Generating…' : 'Download PDF'}
+                </button>
+              )}
+              <button
+                onClick={() => setSelectedId(null)}
+                className="text-xs text-gray-500 hover:text-gray-700"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+          <div className="p-5">
+            {detailLoading ? (
+              <div className="text-sm text-gray-400">Loading audit body…</div>
+            ) : detail ? (
+              <pre className="text-xs font-mono text-gray-700 whitespace-pre-wrap leading-relaxed bg-gray-50 rounded-lg p-4 border border-gray-100 max-h-[32rem] overflow-y-auto">
+                {detail.logText}
+              </pre>
+            ) : (
+              <div className="text-sm text-red-600">Failed to load audit body.</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
