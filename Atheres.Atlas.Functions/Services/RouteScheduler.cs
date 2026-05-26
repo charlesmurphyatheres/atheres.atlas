@@ -179,7 +179,27 @@ public class RouteScheduler : IRouteScheduler
         audit.Step(3, "Resolve active hubs");
         audit.Line($"Active hubs: {hubs.Count}");
         foreach (var h in hubs)
-            audit.Line($"  · {h.Name} (sort wait {h.SortingWaitMinutes} min)");
+        {
+            var flags = string.Join(", ", new[]
+            {
+                h.IsTransferSite ? "TransferSite" : null,
+                h.IsChicagoLand  ? "ChicagoLand"  : null,
+            }.Where(s => s is not null));
+            var flagsLabel = flags.Length > 0 ? $"  [{flags}]" : "";
+            audit.Line($"  · {h.Name} (sort wait {h.SortingWaitMinutes} min){flagsLabel}");
+        }
+
+        // The transfer-site hub is the sole consolidation/sort depot for the
+        // company (HUB_ROM in the Secure Transport fleet). When configured,
+        // every multi-zone pickup that ISN'T eligible for the non-ChicagoLand
+        // bypass anchors here so the warehouse → sort → per-zone-delivery
+        // pipeline can run. When no hub is flagged, the scheduler falls back
+        // to the legacy "closest hub" assignment for everything.
+        var transferSiteHub = hubs.FirstOrDefault(h => h.IsTransferSite);
+        if (transferSiteHub is not null)
+            audit.Line($"Transfer site: {transferSiteHub.Name} (anchors non-bypass multi-zone pickups).");
+        else if (hubs.Count > 1)
+            audit.Line("No transfer-site hub configured — multi-zone batches fall back to closest-hub assignment.");
 
         if (hubs.Count == 0)
         {
@@ -299,10 +319,16 @@ public class RouteScheduler : IRouteScheduler
             ? new Dictionary<Guid, ZoneDetail>()
             : await _db.Zones.IgnoreQueryFilters()
                 .Where(z => zoneIdsInBatch.Contains(z.Id))
-                .Select(z => new { z.Id, z.Code, DistrictNumber = z.District.Number, DistrictName = z.District.Name })
+                .Select(z => new
+                {
+                    z.Id, z.Code,
+                    DistrictNumber        = z.District.Number,
+                    DistrictName          = z.District.Name,
+                    DistrictIsChicagoLand = z.District.IsChicagoLand,
+                })
                 .ToDictionaryAsync(
                     x => x.Id,
-                    x => new ZoneDetail(x.Code, x.DistrictNumber, x.DistrictName),
+                    x => new ZoneDetail(x.Code, x.DistrictNumber, x.DistrictName, x.DistrictIsChicagoLand),
                     ct);
 
         var totalZones = new HashSet<Guid>();
@@ -337,41 +363,29 @@ public class RouteScheduler : IRouteScheduler
 
         foreach (var group in groups)
         {
+            // Resolve this group's warehouse (may be null for hub-originating
+            // orders) once up front — both the bypass check and the hub-pick
+            // need it.
+            Warehouse? whForGroup = null;
+            if (group.Key.WarehouseId.HasValue)
+                warehousesById.TryGetValue(group.Key.WarehouseId.Value, out whForGroup);
 
-            // Pick the hub closest to this group's warehouse via Haversine
-            // distance — cheap, no extra Google calls, and produces the
-            // intuitive "start at the depot nearest the supplier" loop.
-            // Falls back to the first active hub when the warehouse has
-            // no coordinates yet (shouldn't happen after the geocode pass
-            // above, but be defensive).
-            Guid hubIdForGroup;
-            if (group.Key.WarehouseId.HasValue
-                && warehousesById.TryGetValue(group.Key.WarehouseId.Value, out var wh)
-                && wh.Latitude.HasValue && wh.Longitude.HasValue)
-            {
-                hubIdForGroup = PickClosestHub(hubs, wh.Latitude.Value, wh.Longitude.Value);
-            }
-            else
-            {
-                hubIdForGroup = hubs[0].Id;
-            }
+            var warehouseLabel = whForGroup?.BusinessName ?? "(no warehouse)";
 
-            var hubForGroup     = hubs.First(h => h.Id == hubIdForGroup);
-            var warehouseLabel  = group.Key.WarehouseId.HasValue
-                && warehousesById.TryGetValue(group.Key.WarehouseId.Value, out var whName)
-                    ? whName.BusinessName
-                    : "(no warehouse)";
-
-            audit.Raw("");
-            audit.Line($"Group: {warehouseLabel} → hub \"{hubForGroup.Name}\" (sort wait {hubForGroup.SortingWaitMinutes} min)");
-
-            // Inspect the whole warehouse-group's zone footprint. The
-            // dispatch shape depends on whether this group is single-zone
-            // (hub bypass — DirectDelivery) or multi-zone (warehouse →
-            // hub Pickup, then per-zone delivery vans dispatch from the hub
-            // after the sort wait).
+            // Inspect the whole warehouse-group's zone footprint. The dispatch
+            // shape depends on three things, evaluated in order:
+            //   1. Bypass-eligible (non-ChicagoLand warehouse + every order
+            //      delivers to a non-ChicagoLand district) → DirectDelivery
+            //      anchored at the closest NON-transfer-site hub. Skips the
+            //      transfer site entirely; multi-zone is allowed.
+            //   2. Single-zone (or all-unzoned) → DirectDelivery anchored at
+            //      the closest hub. Same hub-bypass route shape.
+            //   3. Multi-zone, transfer site required → Pickup van to the
+            //      transfer-site hub + per-zone ZonedDelivery vans after the
+            //      sort wait.
             var ordersByZone = new Dictionary<Guid, List<Order>>();
             var unzonedOrders = new List<Order>();
+            var anyOrderIsChicagoLand = false;
             foreach (var o in group)
             {
                 Guid? zoneId = o.StoreId.HasValue
@@ -384,11 +398,96 @@ public class RouteScheduler : IRouteScheduler
                         ordersByZone[zoneId.Value] = list = new List<Order>();
                     list.Add(o);
                     totalZones.Add(zoneId.Value);
+
+                    if (zoneDetailById.TryGetValue(zoneId.Value, out var zd) && zd.DistrictIsChicagoLand)
+                        anyOrderIsChicagoLand = true;
                 }
                 else
                 {
                     unzonedOrders.Add(o);
+                    // Unzoned orders default to non-ChicagoLand (per the
+                    // entity default) — they don't disqualify the bypass.
                 }
+            }
+
+            var isSingleZone   = ordersByZone.Count <= 1 && unzonedOrders.Count == 0;
+            var warehouseIsChicagoLand = whForGroup?.IsChicagoLand ?? false;
+            var bypassEligible = whForGroup is not null
+                              && !warehouseIsChicagoLand
+                              && !anyOrderIsChicagoLand
+                              && !isSingleZone; // single-zone already uses DirectDelivery → no separate bypass needed
+
+            // Hub selection. We pick AFTER the bypass calculation because the
+            // bypass dictates whether we want the transfer-site hub or
+            // explicitly NOT the transfer-site hub.
+            Guid hubIdForGroup;
+            var hasWarehouseCoords = whForGroup is not null
+                                  && whForGroup.Latitude.HasValue
+                                  && whForGroup.Longitude.HasValue;
+
+            if (bypassEligible && hasWarehouseCoords)
+            {
+                // Anchor at the nearest NON-transfer-site hub so the van
+                // ends its day at its natural home base (Pekin / Springfield
+                // for outstate Illinois) rather than detouring through
+                // Romeoville. If every hub is the transfer site, fall
+                // through to the unfiltered closest pick.
+                var nonTransferHubs = hubs.Where(h => !h.IsTransferSite).ToList();
+                if (nonTransferHubs.Count > 0)
+                {
+                    hubIdForGroup = PickClosestHub(nonTransferHubs, whForGroup!.Latitude!.Value, whForGroup.Longitude!.Value);
+                }
+                else
+                {
+                    hubIdForGroup = PickClosestHub(hubs, whForGroup!.Latitude!.Value, whForGroup.Longitude!.Value);
+                }
+            }
+            else if (!isSingleZone && whForGroup is not null && transferSiteHub is not null)
+            {
+                // Multi-zone, non-bypass, transfer-site hub configured → force
+                // the transfer site so the warehouse → sort → per-zone-delivery
+                // pipeline can run. Distance to the warehouse is irrelevant
+                // because the sort step is what dictates the hub choice.
+                hubIdForGroup = transferSiteHub.Id;
+            }
+            else if (hasWarehouseCoords)
+            {
+                // Single-zone DirectDelivery, OR multi-zone with no transfer
+                // site configured — fall back to the legacy "closest hub"
+                // pick. DirectDelivery doesn't visit the hub for sorting,
+                // so closest-hub still produces an intuitive route shape.
+                hubIdForGroup = PickClosestHub(hubs, whForGroup!.Latitude!.Value, whForGroup.Longitude!.Value);
+            }
+            else
+            {
+                // No warehouse / no coords — pick the first active hub.
+                // Pre-geocoding should make this rare; defensive fallback.
+                hubIdForGroup = hubs[0].Id;
+            }
+
+            var hubForGroup = hubs.First(h => h.Id == hubIdForGroup);
+
+            // Audit the decision so the operator can trace WHY a given hub
+            // was picked. The bypass + transfer-site choices are the most
+            // surprising, so call them out explicitly.
+            audit.Raw("");
+            string hubChoiceReason;
+            if (bypassEligible && hubForGroup.IsTransferSite == false)
+                hubChoiceReason = "non-ChicagoLand bypass → closest non-transfer-site hub";
+            else if (hubForGroup.IsTransferSite && !isSingleZone)
+                hubChoiceReason = "multi-zone with sort required → transfer-site hub";
+            else if (isSingleZone)
+                hubChoiceReason = "single-zone DirectDelivery → closest hub";
+            else
+                hubChoiceReason = "default closest-hub assignment";
+            audit.Line($"Group: {warehouseLabel} → hub \"{hubForGroup.Name}\" ({hubChoiceReason}; sort wait {hubForGroup.SortingWaitMinutes} min)");
+            if (bypassEligible)
+            {
+                audit.Line($"  Bypass eligibility: warehouse IsChicagoLand={warehouseIsChicagoLand}, any ChicagoLand-zone order={anyOrderIsChicagoLand} → ELIGIBLE (multi-zone DirectDelivery, skip transfer site).");
+            }
+            else if (!isSingleZone && whForGroup is not null)
+            {
+                audit.Line($"  Bypass eligibility: warehouse IsChicagoLand={warehouseIsChicagoLand}, any ChicagoLand-zone order={anyOrderIsChicagoLand} → INELIGIBLE (routes through transfer site for sort).");
             }
 
             // Timing baseline for this delivery date. The window-start is
@@ -400,12 +499,45 @@ public class RouteScheduler : IRouteScheduler
             // estimate of the hub→warehouse round trip.
             var deliveryStart = group.Key.OrderDate.Date.Add(deliveryWindowStart);
 
+            // Non-ChicagoLand bypass exception → multi-zone DirectDelivery.
+            // The van picks up at the warehouse, visits every stop (across
+            // any number of non-ChicagoLand zones), then returns to the
+            // home hub. No sort, no transfer-site detour. Chunked by the
+            // standard max-stops cap; each chunk becomes its own van picking
+            // up its slice of the load at the warehouse.
+            if (bypassEligible)
+            {
+                var allOrdersForGroup = new List<Order>();
+                foreach (var (_, list) in ordersByZone) allOrdersForGroup.AddRange(list);
+                allOrdersForGroup.AddRange(unzonedOrders);
+                audit.Line($"  Multi-zone bypass ({ordersByZone.Count} zone(s), {unzonedOrders.Count} unzoned) → DirectDelivery van(s) skip the transfer site.");
+                EmitChunks(
+                    allOrdersForGroup,
+                    RouteType.DirectDelivery,
+                    // ZoneId stays null — the route legitimately spans
+                    // multiple zones. The optimizer's warehouse → stops →
+                    // hub shape handles it the same way single-zone
+                    // DirectDelivery does.
+                    null,
+                    chunkSize,
+                    group.Key.WarehouseId,
+                    hubIdForGroup,
+                    group.Key.OrderDate,
+                    deliveryStart,
+                    storeZoneById,
+                    zoneDetailById,
+                    messages,
+                    audit,
+                    "DirectDelivery van (bypass)");
+                audit.DirectDeliveryCount += Math.Max(1, (allOrdersForGroup.Count + chunkSize - 1) / chunkSize);
+                continue;
+            }
+
             // Single-zone (or all-unzoned) → DirectDelivery: the van picks
             // up at the warehouse and goes straight to the stops, skipping
             // the hub sort entirely. Same 5-stop cap on deliveries; the
             // warehouse pickup leg is not counted toward the cap (see
             // UserRouteSettings.DefaultMaxStops).
-            var isSingleZone = ordersByZone.Count <= 1 && unzonedOrders.Count == 0;
             if (isSingleZone)
             {
                 var zoneId = ordersByZone.Keys.FirstOrDefault();
@@ -925,8 +1057,15 @@ public class RouteScheduler : IRouteScheduler
         return (ok, failed);
     }
 
-    /// <summary>Zone code + district info for the audit-detail block.</summary>
-    private sealed record ZoneDetail(string Code, int DistrictNumber, string DistrictName);
+    /// <summary>Zone code + district info for the audit-detail block.
+    /// <paramref name="DistrictIsChicagoLand"/> drives the transfer-site
+    /// bypass — every order in a group must resolve to a non-ChicagoLand
+    /// district for the bypass exception to fire.</summary>
+    private sealed record ZoneDetail(
+        string Code,
+        int    DistrictNumber,
+        string DistrictName,
+        bool   DistrictIsChicagoLand);
 
     /// <summary>
     /// Pairs one or more Pickup routes with the ZonedDelivery routes that

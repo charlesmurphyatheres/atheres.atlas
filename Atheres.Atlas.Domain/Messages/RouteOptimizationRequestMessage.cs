@@ -9,9 +9,14 @@ namespace Atheres.Atlas.Domain.Messages;
 ///   Pickup         — warehouse → hub. No deliveries. WarehouseId required.
 ///   ZonedDelivery  — hub → zone stops → hub. WarehouseId null (pickup is a
 ///                    separate Pickup message). ZoneId set, all OrderIds share it.
-///   DirectDelivery — warehouse → zone stops → hub. WarehouseId required.
-///                    Issued only when a warehouse's whole batch is a single
-///                    zone (hub bypass per the new flow's exception).
+///   DirectDelivery — warehouse → stops → hub. WarehouseId required. Issued
+///                    in two cases: (1) a warehouse's whole batch is a single
+///                    zone (the original hub-bypass exception), or (2) the
+///                    non-ChicagoLand bypass fires — a non-ChicagoLand
+///                    warehouse whose every order delivers to a
+///                    non-ChicagoLand district. Case (2) may legitimately
+///                    span multiple zones; <see cref="ZoneId"/> is null when
+///                    it does.
 ///   Legacy         — old single-route shape from before the pickup/zone split.
 ///                    The optimizer treats it as backwards-compat: hub →
 ///                    warehouse → stops → hub when a warehouse is present,

@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { Order, Route, UserRouteSettings, PagedResult, TokenResponse, Company, Hub, Warehouse, OrderBatch, CommunicationRecord, Truck, AppUser } from '../types'
+import type { Order, Route, UserRouteSettings, PagedResult, TokenResponse, Company, Hub, Warehouse, District, OrderBatch, CommunicationRecord, Truck, AppUser } from '../types'
 
 // In dev the Vite proxy maps /api to localhost:7071. In production behind
 // Front Door the same relative /api path works. Deployments that serve the
@@ -425,6 +425,19 @@ export async function updateWarehouse(id: string, payload: Partial<Warehouse>): 
 
 export async function deleteWarehouse(id: string): Promise<void> {
   await api.delete(`/warehouses/${id}`)
+}
+
+// ---- Districts ----
+// Districts are seeded from store_zone.csv. The UI can flip IsChicagoLand /
+// IsActive / Name but cannot create or destroy a district.
+
+export async function getDistricts(): Promise<District[]> {
+  const { data } = await api.get<District[]>('/districts/')
+  return data
+}
+
+export async function updateDistrict(id: string, payload: Partial<District>): Promise<void> {
+  await api.put(`/districts/${id}`, payload)
 }
 
 // ---- Batches ----

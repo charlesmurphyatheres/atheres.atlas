@@ -32,6 +32,16 @@ public class Warehouse
     /// </summary>
     public int LoadingWaitMinutes { get; set; } = 15;
 
+    /// <summary>
+    /// True when this warehouse is inside the Chicago-Naperville-Elgin MSA.
+    /// Used by the non-ChicagoLand bypass: a batch picked up here whose
+    /// orders all deliver to non-ChicagoLand zones skips the HUB_ROM
+    /// transfer site and goes warehouse → stops → home hub directly.
+    /// Defaults to false so a newly-added supplier is treated as outstate
+    /// until explicitly flagged.
+    /// </summary>
+    public bool IsChicagoLand { get; set; } = false;
+
     // Tentative weekly pickup schedule (nullable = no standing pickup that day)
     public TimeSpan? MondayPickupTime    { get; set; }
     public TimeSpan? TuesdayPickupTime   { get; set; }

@@ -48,6 +48,8 @@ public class HubFunctions
                 h.Id, h.CompanyId, h.Name,
                 h.Address, h.City, h.State, h.Zip,
                 h.SortingWaitMinutes,
+                h.IsTransferSite,
+                h.IsChicagoLand,
                 h.IsActive,
             })
             .ToListAsync(ct);
@@ -88,6 +90,8 @@ public class HubFunctions
             // SortingWaitMinutes defaults to 30 on the entity; allow create
             // to override it when the operator already knows the hub's pace.
             SortingWaitMinutes = ClampSortingWait(dto.SortingWaitMinutes ?? 30),
+            IsTransferSite    = dto.IsTransferSite ?? false,
+            IsChicagoLand     = dto.IsChicagoLand  ?? false,
         };
 
         _db.Hubs.Add(hub);
@@ -133,6 +137,8 @@ public class HubFunctions
         if (dto?.Zip is not null)                      hub.Zip     = dto.Zip;
         if (dto?.IsActive is not null)                 hub.IsActive = dto.IsActive.Value;
         if (dto?.SortingWaitMinutes is not null)       hub.SortingWaitMinutes = ClampSortingWait(dto.SortingWaitMinutes.Value);
+        if (dto?.IsTransferSite is not null)           hub.IsTransferSite     = dto.IsTransferSite.Value;
+        if (dto?.IsChicagoLand  is not null)           hub.IsChicagoLand      = dto.IsChicagoLand.Value;
 
         if (addressChanged)
         {
@@ -199,6 +205,8 @@ public class CreateHubDto
     public string? State { get; set; }
     public string? Zip { get; set; }
     public int? SortingWaitMinutes { get; set; }
+    public bool? IsTransferSite { get; set; }
+    public bool? IsChicagoLand { get; set; }
 }
 
 public class UpdateHubDto
@@ -210,4 +218,6 @@ public class UpdateHubDto
     public string? Zip { get; set; }
     public bool? IsActive { get; set; }
     public int? SortingWaitMinutes { get; set; }
+    public bool? IsTransferSite { get; set; }
+    public bool? IsChicagoLand { get; set; }
 }

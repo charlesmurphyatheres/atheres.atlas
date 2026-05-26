@@ -28,6 +28,26 @@ public class Hub
     /// </summary>
     public int SortingWaitMinutes { get; set; } = 30;
 
+    /// <summary>
+    /// True for the single hub that acts as the consolidation / transfer site
+    /// for the company. Pickup vans bring warehouse loads here to be sorted by
+    /// zone before per-zone delivery vans dispatch. Only transfer-site hubs may
+    /// receive warehouse pickups when a batch spans multiple delivery zones —
+    /// every other hub is delivery-only and cannot perform the warehouse →
+    /// hub-sort leg. Exactly one hub per company is expected to be flagged.
+    /// </summary>
+    public bool IsTransferSite { get; set; } = false;
+
+    /// <summary>
+    /// Whether this hub physically sits within the Chicago-Naperville-Elgin
+    /// MSA. Drives the non-ChicagoLand bypass: a pickup at a non-ChicagoLand
+    /// warehouse whose orders all land in non-ChicagoLand zones skips the
+    /// transfer site entirely (it is too far away to be worth the detour).
+    /// Future routing rules may also consult this flag — keep accurate per
+    /// hub even though the transfer-site flag is the only consumer today.
+    /// </summary>
+    public bool IsChicagoLand { get; set; } = false;
+
     public bool IsActive    { get; set; } = true;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;

@@ -398,7 +398,28 @@ public class BatchAgent
         if (routableOrders.Count == 0)
             return new BadRequestObjectResult(new { error = "No geocoded orders available for routing." });
 
-        // ---- Assign orders to best hub using Google Maps Distance Matrix ----
+        // ---- Bypass eligibility ----
+        // The non-ChicagoLand bypass exception lets a non-ChicagoLand
+        // warehouse whose orders all deliver to non-ChicagoLand districts
+        // skip the transfer site and use the legacy closest-hub assignment.
+        // Anything else with a transfer-site hub configured goes to the
+        // transfer site so the depot choice matches the routing rule —
+        // the actual Pickup → sort → ZonedDelivery orchestration happens
+        // through RouteScheduler.EnqueueAsync, not this Legacy path.
+        var transferSiteHub = hubs.FirstOrDefault(h => h.IsTransferSite);
+        var orderStoreIds = routableOrders
+            .Where(o => o.StoreId.HasValue)
+            .Select(o => o.StoreId!.Value)
+            .Distinct()
+            .ToList();
+        var anyChicagoLandOrder = orderStoreIds.Count > 0
+            && await _db.Stores.IgnoreQueryFilters()
+                .AnyAsync(s => orderStoreIds.Contains(s.Id)
+                            && s.Zone != null
+                            && s.Zone.District.IsChicagoLand, ct);
+        var bypassEligible = warehouse.IsChicagoLand == false && !anyChicagoLandOrder;
+
+        // ---- Assign orders to a hub ----
         Dictionary<Guid, List<Order>> hubAssignments;
 
         if (hubs.Count == 1)
@@ -406,41 +427,59 @@ public class BatchAgent
             // Single hub — no need for Distance Matrix
             hubAssignments = new() { [hubs[0].Id] = routableOrders };
         }
+        else if (!bypassEligible && transferSiteHub is not null)
+        {
+            // Non-bypass + transfer-site configured → force the transfer
+            // site as the depot. Distance Matrix is unnecessary because
+            // distance to the warehouse is irrelevant when the routing
+            // rule already dictates the hub.
+            _logger.LogInformation(
+                "ReadyToPickup: forcing transfer-site hub {Hub} for non-bypass batch from {Warehouse}",
+                transferSiteHub.Name, warehouse.BusinessName);
+            hubAssignments = new() { [transferSiteHub.Id] = routableOrders };
+        }
         else
         {
+            // Bypass-eligible, OR no transfer-site hub configured → use the
+            // legacy closest-hub-per-order assignment via Distance Matrix.
             // Self-heal: any hub missing coordinates gets geocoded once
             // and persisted, so the next run reads from the DB instead of
             // calling Google. Mirrors RouteOptimizationAgent's caching.
             await EnsureHubsGeocodedAsync(hubs, ct);
 
-            // Use Distance Matrix: measure distance from each hub to each
-            // store. Pass "lat,lng" strings whenever we have coords cached
-            // — Google still accepts addresses, but using coords skips its
-            // server-side geocode lookup that we already paid for once.
-            var hubAddresses   = hubs.Select(h => BuildPoint(h.Latitude, h.Longitude, h.FormattedAddress ?? h.FullAddress)).ToList();
+            // For the bypass we restrict the candidate hubs to non-transfer
+            // -site only — the whole point of the bypass is to avoid the
+            // transfer-site detour. If somehow every hub is the transfer
+            // site (shouldn't happen in practice), fall back to all hubs.
+            var candidateHubs = bypassEligible
+                ? hubs.Where(h => !h.IsTransferSite).ToList()
+                : hubs;
+            if (candidateHubs.Count == 0) candidateHubs = hubs;
+
+            var hubAddresses   = candidateHubs.Select(h => BuildPoint(h.Latitude, h.Longitude, h.FormattedAddress ?? h.FullAddress)).ToList();
             var storeAddresses = routableOrders.Select(o => BuildPoint(o.Latitude, o.Longitude, o.FormattedAddress ?? o.FullAddress)).ToList();
 
             var matrix = await _maps.GetDistanceMatrixAsync(hubAddresses, storeAddresses, ct);
 
-            hubAssignments = hubs.ToDictionary(h => h.Id, _ => new List<Order>());
+            hubAssignments = candidateHubs.ToDictionary(h => h.Id, _ => new List<Order>());
 
             if (matrix is not null && matrix.Count > 0)
             {
-                // For each order, find the hub with shortest travel time
+                // For each order, find the candidate hub with shortest travel time
                 for (int orderIdx = 0; orderIdx < routableOrders.Count; orderIdx++)
                 {
                     var order = routableOrders[orderIdx];
-                    var bestHubId = hubs[0].Id;
+                    var bestHubId = candidateHubs[0].Id;
                     var bestDuration = int.MaxValue;
 
-                    for (int hubIdx = 0; hubIdx < hubs.Count; hubIdx++)
+                    for (int hubIdx = 0; hubIdx < candidateHubs.Count; hubIdx++)
                     {
                         // Matrix entries: hubIdx * destCount + orderIdx
                         var entryIdx = hubIdx * routableOrders.Count + orderIdx;
                         if (entryIdx < matrix.Count && matrix[entryIdx].DurationSeconds < bestDuration)
                         {
                             bestDuration = matrix[entryIdx].DurationSeconds;
-                            bestHubId = hubs[hubIdx].Id;
+                            bestHubId = candidateHubs[hubIdx].Id;
                         }
                     }
 
@@ -449,9 +488,17 @@ public class BatchAgent
             }
             else
             {
-                // Fallback: assign all to first hub if Distance Matrix fails
-                _logger.LogWarning("Distance Matrix failed, falling back to first hub");
-                hubAssignments[hubs[0].Id] = routableOrders;
+                // Fallback when Distance Matrix fails: prefer the transfer
+                // site (per the routing rule) over a random "first hub"
+                // pick. Bypass-eligible batches still skip the transfer
+                // site — they get the first non-transfer-site hub.
+                var fallbackHubId = !bypassEligible && transferSiteHub is not null
+                    ? transferSiteHub.Id
+                    : candidateHubs[0].Id;
+                _logger.LogWarning(
+                    "Distance Matrix failed, falling back to hub {Hub} (bypass={Bypass})",
+                    fallbackHubId, bypassEligible);
+                hubAssignments[fallbackHubId] = routableOrders;
             }
         }
 

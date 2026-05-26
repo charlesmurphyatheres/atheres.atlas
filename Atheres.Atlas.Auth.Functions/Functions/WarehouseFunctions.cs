@@ -57,6 +57,7 @@ public class WarehouseFunctions
                 w.Address, w.City, w.State, w.Zip,
                 w.LicenseNumber, w.LegacyLicenseNumber,
                 w.LoadingWaitMinutes,
+                w.IsChicagoLand,
                 w.IsActive,
                 mondayPickupTime    = w.MondayPickupTime.HasValue    ? w.MondayPickupTime.Value.ToString(@"hh\:mm")    : null,
                 tuesdayPickupTime   = w.TuesdayPickupTime.HasValue   ? w.TuesdayPickupTime.Value.ToString(@"hh\:mm")   : null,
@@ -118,6 +119,7 @@ public class WarehouseFunctions
             // Hub.SortingWaitMinutes so a fat-finger value can't push
             // delivery routes hours out.
             LoadingWaitMinutes   = ClampLoadingWait(dto.LoadingWaitMinutes ?? 15),
+            IsChicagoLand        = dto.IsChicagoLand ?? false,
         };
         warehouse.Companies.Add(targetCompany);
 
@@ -170,6 +172,7 @@ public class WarehouseFunctions
         if (dto?.LegacyLicenseNumber is not null)           warehouse.LegacyLicenseNumber = dto.LegacyLicenseNumber;
         if (dto?.IsActive is not null)                      warehouse.IsActive      = dto.IsActive.Value;
         if (dto?.LoadingWaitMinutes is not null)            warehouse.LoadingWaitMinutes = ClampLoadingWait(dto.LoadingWaitMinutes.Value);
+        if (dto?.IsChicagoLand is not null)                 warehouse.IsChicagoLand = dto.IsChicagoLand.Value;
 
         if (addressChanged)
         {
@@ -263,6 +266,7 @@ public class CreateWarehouseDto
     public string? LicenseNumber { get; set; }
     public string? LegacyLicenseNumber { get; set; }
     public int? LoadingWaitMinutes { get; set; }
+    public bool? IsChicagoLand { get; set; }
 }
 
 public class UpdateWarehouseDto
@@ -277,6 +281,7 @@ public class UpdateWarehouseDto
     public string? LegacyLicenseNumber { get; set; }
     public bool? IsActive { get; set; }
     public int? LoadingWaitMinutes { get; set; }
+    public bool? IsChicagoLand { get; set; }
     // Weekly pickup schedule ("HH:mm" or "" to clear)
     public string? MondayPickupTime { get; set; }
     public string? TuesdayPickupTime { get; set; }

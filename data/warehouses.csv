@@ -1,27 +1,27 @@
-Legacy License Number,License Number,Business Name,Address,AKA market name (schedule),Address,City,State,Postal Code
-2108010128CG,CG00000019,11th Level Inc,"1125 Carnegie Street, Rolling Meadows, Il, 60008",UMI Farms (UF),1125 Carnegie Street,Rolling Meadows,IL,60008
-2108011028IN,IN00000026,1248 IP Holdings,"1121 Hickox, Lincoln, Il, 62656",KANHA (KA),1121 Hickox,Lincoln,IL,62656
-1503060627AU,1.15243E+13,Ascend Illinois - Barry,"1 310Th Ave, Barry, Il, 62312",Ascend (AD),1 310Th Ave,Barry,IL,62312
-2108010129CG,CG00000020,Cannect Gardens LLC,"3700 Sandra St, Franklin Park, Il, 60131",Cannect Wellness (CW),3700 Sandra St,Franklin Park,IL,60131
-2108011021IN,IN00000015,CentoVentiCinque LLC,"2620 Auburn St., Rockford, Il, 61101",Gron (GR),2620 Auburn St.,Rockford,IL,61101
-2108011049IN,IN00000035,CNS Harvest LLC,"6360 Emerald Parkway, Monee, Il, 60449",Rove Brand (RO),6360 Emerald Parkway,Monee,IL,60449
-1609060667AU,1157922762,"Compass Ventures, Inc.","815 Industrial Dr, Litchfield, Il, 62056",Curaleaf (CL),815 Industrial Dr,Litchfield,IL,62056
-2206010113CG,CG00000085,CRAFT SALES R US LLC,"2400 Greenleaf Ave, Elk Grove Vlg, Il, 60007",Echelon (EL),2400 Greenleaf Ave,Elk Grove Vlg,IL,60007
-2108011042IN,IN00000037,Culinary Cannabis Company,"1245 E. Forest Ave, Des Plaines, Il, 60018",Culinary Cannabis Co. (CC),1245 E. Forest Ave,Des Plaines,IL,60018
-2108010101CG,CG00000042,"DRECISCO FARMS, LLC","21906 W Grant Hwy, Marengo, Il, 60152",Drecisco Farms (DF),21906 W Grant Hwy,Marengo,IL,60152
-2108011013IN,IN00000008,Elevated Organics LLC,"5838 Howard St, Skokie, Il, 60077",Elevated Organics (EO),5838 Howard St,Skokie,IL,60077
-2108010131CG,CG00000022,Galaxy Labs LLC,"22240 Governors Hwy, Richton Park, Il, 60471",Galaxy Labs (GL),22240 Governors Hwy,Richton Park,IL,60471
-2206010146CG,CG00000068,Green Card Veterans of McHenry,"3707 N Division St, Morris, Il, 60450",La Vida Mota (LM),3707 N Division St,Morris,IL,60450
-2108011040IN,IN00000046,HDC Group LLC,"1291 Brummel Ave, Elk Grove Vlg, Il, 60007",OGeez Brands/Timeless Select (TS),1291 Brummel Ave,Elk Grove Vlg,IL,60007
-2108010132CG,CG00000023,Hi Rise Group LLC,"32040 S Route 45, Peotone, Il, 60468",NEZ (NZ),32040 S Route 45,Peotone,IL,60468
-1504160768AU,6412206849,IL Grown Medicine,"5500 Adams Street, Matteson, Il, 60443",4Front Ventures (4F),5500 Adams Street,Matteson,IL,60443
-2108011017IN,IN00000012,Imperial Products LLC,"2638 Davisson Street, River Grove, Il, 60171",Redbud Roots (RB),2638 Davisson Street,River Grove,IL,60171
-2108011008IN,IN00000029,Krown LLC,"845 Brenkman Dr., Pekin, Il, 61554",Wyld (WD),845 Brenkman Dr.,Pekin,IL,61554
-2108010112CG,CG00000026,NBCG Partners LLC,"300 American Way, Du Quoin, Il, 62832",Elevated Cannabis (EC),300 American Way,Du Quoin,IL,62832
-1503060629AU,3017292370,PharmaCann Inc - Dwight,"1200 E Mazon Ave, Dwight, Il, 60420",PharmaCann (PC),1200 E Mazon Ave,Dwight,IL,60420
-2206010108CG,CG00000058,Realeaf Botanicals LLC,"1777 2Nd Avenue North, Silvis, Il, 61282",Realeaf Botanicals (RL),1777 2Nd Avenue North,Silvis,IL,61282
-1503060626AU,2744706655,"Revolution Cannabis Delavan, LLC","1 Revolution Way, Delavan, Il, 61734",Revolution (RV),1 Revolution Way,Delavan,IL,61734
-2108011018IN,IN00000028,SLI LLC,"1411 S Eastwood Dr, Woodstock, Il, 60098",Six Labs (SL),1411 S Eastwood Dr,Woodstock,IL,60098
-2206010122CG,CG00000098,SOL-CANNA LLC,"800 31St Ave, Fulton, Il, 61252",Sol Canna (SC),800 31St Ave,Fulton,IL,61252
-2108010130CG,CG00000021,Flora Arbor LLC,"1300 Abbott Dr, Elgin, Il, 60123",Flora Arbor (FA),1300 Abbott Dr,Elgin,IL,60123
-2108010106CG,CG00000006,Helios Labs LLC,"2150 Parkes Dr, Broadview, Il, 60155",Helios Labs (HE),2150 Parkes Dr,Broadview,IL,60155
+Legacy License Number,License Number,Business Name,Full Address,AKA market name (schedule),Address,City,State,Postal Code,IsChicagoLand
+2108010128CG,CG00000019,11th Level Inc,"1125 Carnegie Street, Rolling Meadows, Il, 60008",UMI Farms (UF),1125 Carnegie Street,Rolling Meadows,IL,60008,1
+2108011028IN,IN00000026,1248 IP Holdings,"1121 Hickox, Lincoln, Il, 62656",KANHA (KA),1121 Hickox,Lincoln,IL,62656,0
+1503060627AU,1.15243E+13,Ascend Illinois - Barry,"1 310Th Ave, Barry, Il, 62312",Ascend (AD),1 310Th Ave,Barry,IL,62312,0
+2108010129CG,CG00000020,Cannect Gardens LLC,"3700 Sandra St, Franklin Park, Il, 60131",Cannect Wellness (CW),3700 Sandra St,Franklin Park,IL,60131,1
+2108011021IN,IN00000015,CentoVentiCinque LLC,"2620 Auburn St., Rockford, Il, 61101",Gron (GR),2620 Auburn St.,Rockford,IL,61101,0
+2108011049IN,IN00000035,CNS Harvest LLC,"6360 Emerald Parkway, Monee, Il, 60449",Rove Brand (RO),6360 Emerald Parkway,Monee,IL,60449,1
+1609060667AU,1157922762,"Compass Ventures, Inc.","815 Industrial Dr, Litchfield, Il, 62056",Curaleaf (CL),815 Industrial Dr,Litchfield,IL,62056,0
+2206010113CG,CG00000085,CRAFT SALES R US LLC,"2400 Greenleaf Ave, Elk Grove Vlg, Il, 60007",Echelon (EL),2400 Greenleaf Ave,Elk Grove Vlg,IL,60007,1
+2108011042IN,IN00000037,Culinary Cannabis Company,"1245 E. Forest Ave, Des Plaines, Il, 60018",Culinary Cannabis Co. (CC),1245 E. Forest Ave,Des Plaines,IL,60018,1
+2108010101CG,CG00000042,"DRECISCO FARMS, LLC","21906 W Grant Hwy, Marengo, Il, 60152",Drecisco Farms (DF),21906 W Grant Hwy,Marengo,IL,60152,1
+2108011013IN,IN00000008,Elevated Organics LLC,"5838 Howard St, Skokie, Il, 60077",Elevated Organics (EO),5838 Howard St,Skokie,IL,60077,1
+2108010131CG,CG00000022,Galaxy Labs LLC,"22240 Governors Hwy, Richton Park, Il, 60471",Galaxy Labs (GL),22240 Governors Hwy,Richton Park,IL,60471,1
+2206010146CG,CG00000068,Green Card Veterans of McHenry,"3707 N Division St, Morris, Il, 60450",La Vida Mota (LM),3707 N Division St,Morris,IL,60450,1
+2108011040IN,IN00000046,HDC Group LLC,"1291 Brummel Ave, Elk Grove Vlg, Il, 60007",OGeez Brands/Timeless Select (TS),1291 Brummel Ave,Elk Grove Vlg,IL,60007,1
+2108010132CG,CG00000023,Hi Rise Group LLC,"32040 S Route 45, Peotone, Il, 60468",NEZ (NZ),32040 S Route 45,Peotone,IL,60468,1
+1504160768AU,6412206849,IL Grown Medicine,"5500 Adams Street, Matteson, Il, 60443",4Front Ventures (4F),5500 Adams Street,Matteson,IL,60443,1
+2108011017IN,IN00000012,Imperial Products LLC,"2638 Davisson Street, River Grove, Il, 60171",Redbud Roots (RB),2638 Davisson Street,River Grove,IL,60171,1
+2108011008IN,IN00000029,Krown LLC,"845 Brenkman Dr., Pekin, Il, 61554",Wyld (WD),845 Brenkman Dr.,Pekin,IL,61554,0
+2108010112CG,CG00000026,NBCG Partners LLC,"300 American Way, Du Quoin, Il, 62832",Elevated Cannabis (EC),300 American Way,Du Quoin,IL,62832,0
+1503060629AU,3017292370,PharmaCann Inc - Dwight,"1200 E Mazon Ave, Dwight, Il, 60420",PharmaCann (PC),1200 E Mazon Ave,Dwight,IL,60420,0
+2206010108CG,CG00000058,Realeaf Botanicals LLC,"1777 2Nd Avenue North, Silvis, Il, 61282",Realeaf Botanicals (RL),1777 2Nd Avenue North,Silvis,IL,61282,0
+1503060626AU,2744706655,"Revolution Cannabis Delavan, LLC","1 Revolution Way, Delavan, Il, 61734",Revolution (RV),1 Revolution Way,Delavan,IL,61734,0
+2108011018IN,IN00000028,SLI LLC,"1411 S Eastwood Dr, Woodstock, Il, 60098",Six Labs (SL),1411 S Eastwood Dr,Woodstock,IL,60098,1
+2206010122CG,CG00000098,SOL-CANNA LLC,"800 31St Ave, Fulton, Il, 61252",Sol Canna (SC),800 31St Ave,Fulton,IL,61252,0
+2108010130CG,CG00000021,Flora Arbor LLC,"1300 Abbott Dr, Elgin, Il, 60123",Flora Arbor (FA),1300 Abbott Dr,Elgin,IL,60123,1
+2108010106CG,CG00000006,Helios Labs LLC,"2150 Parkes Dr, Broadview, Il, 60155",Helios Labs (HE),2150 Parkes Dr,Broadview,IL,60155,1

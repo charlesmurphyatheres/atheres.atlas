@@ -1,16 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
-import { getUsers, registerUser, deactivateUser, getOrders, updateOrderStatus, bulkUpdateOrderStatus, getRoutes, getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse, getHubs, createHub, updateHub, deleteHub, getTrucks, createTruck, updateTruck, deleteTruck, getStores, updateStore, getCompanies, deleteOrder, deleteRoute, getOptimizationAudits, getOptimizationAudit, printRouteItinerary, printOptimizationAudit, type StoreLite, type UpdateStorePayload, type OptimizationAuditSummary, type OptimizationAuditDetail } from '../../services/apiService'
+import { getUsers, registerUser, deactivateUser, getOrders, updateOrderStatus, bulkUpdateOrderStatus, getRoutes, getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse, getHubs, createHub, updateHub, deleteHub, getTrucks, createTruck, updateTruck, deleteTruck, getStores, updateStore, getDistricts, updateDistrict, getCompanies, deleteOrder, deleteRoute, getOptimizationAudits, getOptimizationAudit, printRouteItinerary, printOptimizationAudit, type StoreLite, type UpdateStorePayload, type OptimizationAuditSummary, type OptimizationAuditDetail } from '../../services/apiService'
 import BulkStatusBar from '../ui/BulkStatusBar'
 import { summarizeBulkStatusResult } from '../ui/bulkStatusSummary'
 import { TRUCK_STATUSES, type TruckStatus } from '../../types'
 import { useSortedRows } from '../../hooks/useSortedRows'
 import { SortHeader } from '../ui/SortHeader'
-import type { AppUser, Order, Route, Role, Warehouse, Hub, Truck } from '../../types'
+import type { AppUser, Order, Route, Role, Warehouse, Hub, Truck, District } from '../../types'
 import { format } from 'date-fns'
 import { useAuth } from '../../contexts/AuthContext'
 import { useCompanyContext } from '../../contexts/CompanyContext'
 
-type Tab = 'users' | 'orders' | 'routes' | 'warehouses' | 'hubs' | 'vans' | 'stores' | 'audits'
+type Tab = 'users' | 'orders' | 'routes' | 'warehouses' | 'hubs' | 'vans' | 'stores' | 'districts' | 'audits'
 
 /** Props every tab accepts so it can render a Company column when a
  *  SuperAdmin is viewing "All Companies". `companyName(id)` returns the
@@ -57,7 +57,7 @@ export default function AdminPanel() {
       </div>
 
       <div className="flex gap-1 border-b border-gray-200">
-        {(['orders', 'routes', 'hubs', 'vans', 'warehouses', 'stores', 'users', 'audits'] as Tab[]).map((t) => (
+        {(['orders', 'routes', 'hubs', 'vans', 'warehouses', 'stores', 'districts', 'users', 'audits'] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -78,6 +78,7 @@ export default function AdminPanel() {
       {tab === 'vans' && <VansTab {...display} />}
       {tab === 'warehouses' && <WarehousesTab {...display} />}
       {tab === 'stores' && <StoresTab {...display} />}
+      {tab === 'districts' && <DistrictsTab {...display} />}
       {tab === 'users' && <UsersTab {...display} />}
       {tab === 'audits' && <OptimizationAuditsTab />}
     </div>
@@ -870,7 +871,12 @@ function HubsTab({ showCompany, companyName }: CompanyDisplay) {
   // 30 mirrors the entity default; the input shows blank if a sort wait was
   // never set, but we round-trip it through state as a string to keep the
   // number-input controlled cleanly (empty string vs NaN).
-  const [form, setForm] = useState({ name: '', address: '', city: '', state: '', zip: '', sortingWaitMinutes: '30' })
+  const [form, setForm] = useState({
+    name: '', address: '', city: '', state: '', zip: '',
+    sortingWaitMinutes: '30',
+    isTransferSite: false,
+    isChicagoLand: false,
+  })
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
   const { sorted: sortedHubs, sortKey, sortDir, toggle } = useSortedRows(hubs, {
@@ -885,7 +891,12 @@ function HubsTab({ showCompany, companyName }: CompanyDisplay) {
   }, [])
 
   function startCreate() {
-    setForm({ name: '', address: '', city: '', state: '', zip: '', sortingWaitMinutes: '30' })
+    setForm({
+      name: '', address: '', city: '', state: '', zip: '',
+      sortingWaitMinutes: '30',
+      isTransferSite: false,
+      isChicagoLand: false,
+    })
     setEditing('new')
     setFormError('')
   }
@@ -894,6 +905,8 @@ function HubsTab({ showCompany, companyName }: CompanyDisplay) {
     setForm({
       name: h.name, address: h.address, city: h.city, state: h.state, zip: h.zip,
       sortingWaitMinutes: String(h.sortingWaitMinutes ?? 30),
+      isTransferSite: !!h.isTransferSite,
+      isChicagoLand: !!h.isChicagoLand,
     })
     setEditing(h.id)
     setFormError('')
@@ -910,6 +923,8 @@ function HubsTab({ showCompany, companyName }: CompanyDisplay) {
       const payload = {
         name: form.name, address: form.address, city: form.city, state: form.state, zip: form.zip,
         sortingWaitMinutes: waitParsed,
+        isTransferSite: form.isTransferSite,
+        isChicagoLand: form.isChicagoLand,
       }
       if (editing === 'new') {
         await createHub(payload)
@@ -967,6 +982,36 @@ function HubsTab({ showCompany, companyName }: CompanyDisplay) {
                 Minutes between a pickup van's arrival here and per-zone delivery vans dispatching. 0–240.
               </p>
             </div>
+            <div className="col-span-2 grid grid-cols-2 gap-3 pt-1">
+              <label className="flex items-start gap-2 text-sm text-gray-700 select-none">
+                <input
+                  type="checkbox"
+                  checked={form.isTransferSite}
+                  onChange={(e) => setForm({ ...form, isTransferSite: e.target.checked })}
+                  className="mt-0.5"
+                />
+                <span>
+                  Transfer Site
+                  <span className="block text-[11px] text-gray-400">
+                    Pickups from warehouses are sorted by zone here. Expected to be set on exactly one hub per company.
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm text-gray-700 select-none">
+                <input
+                  type="checkbox"
+                  checked={form.isChicagoLand}
+                  onChange={(e) => setForm({ ...form, isChicagoLand: e.target.checked })}
+                  className="mt-0.5"
+                />
+                <span>
+                  ChicagoLand
+                  <span className="block text-[11px] text-gray-400">
+                    Hub sits inside the Chicago-Naperville-Elgin MSA.
+                  </span>
+                </span>
+              </label>
+            </div>
           </div>
           {formError && <p className="text-sm text-red-600">{formError}</p>}
           <div className="flex gap-2">
@@ -990,6 +1035,7 @@ function HubsTab({ showCompany, companyName }: CompanyDisplay) {
               <SortHeader label="Name"      sortKey="name"               activeKey={sortKey} dir={sortDir} onClick={() => toggle('name')} />
               <SortHeader label="Address"   sortKey="address"            activeKey={sortKey} dir={sortDir} onClick={() => toggle('address')} />
               <SortHeader label="Sort Wait" sortKey="sortingWaitMinutes" activeKey={sortKey} dir={sortDir} onClick={() => toggle('sortingWaitMinutes')} />
+              <th className="px-4 py-3 text-left font-medium">Flags</th>
               <th className="px-4 py-3 text-left font-medium"></th>
             </tr>
           </thead>
@@ -1003,6 +1049,20 @@ function HubsTab({ showCompany, companyName }: CompanyDisplay) {
                 <td className="px-4 py-3 text-gray-600">{h.address}, {h.city} {h.state} {h.zip}</td>
                 <td className="px-4 py-3 text-gray-600">{h.sortingWaitMinutes} min</td>
                 <td className="px-4 py-3">
+                  <div className="flex flex-wrap gap-1">
+                    {h.isTransferSite && (
+                      <span className="inline-block px-2 py-0.5 text-[10px] font-medium rounded bg-purple-100 text-purple-700">
+                        Transfer Site
+                      </span>
+                    )}
+                    {h.isChicagoLand && (
+                      <span className="inline-block px-2 py-0.5 text-[10px] font-medium rounded bg-sky-100 text-sky-700">
+                        ChicagoLand
+                      </span>
+                    )}
+                  </div>
+                </td>
+                <td className="px-4 py-3">
                   <div className="flex gap-2">
                     <button onClick={() => startEdit(h)} className="text-xs text-brand-600 hover:text-brand-800">Edit</button>
                     <button onClick={() => handleDeactivate(h.id)} className="text-xs text-red-500 hover:text-red-700">Deactivate</button>
@@ -1011,7 +1071,7 @@ function HubsTab({ showCompany, companyName }: CompanyDisplay) {
               </tr>
             ))}
             {sortedHubs.length === 0 && (
-              <tr><td colSpan={showCompany ? 5 : 4} className="px-4 py-8 text-center text-gray-400">No hubs found.</td></tr>
+              <tr><td colSpan={showCompany ? 6 : 5} className="px-4 py-8 text-center text-gray-400">No hubs found.</td></tr>
             )}
           </tbody>
         </table>
@@ -1397,6 +1457,128 @@ function StoresTab({ showCompany }: CompanyDisplay) {
   )
 }
 
+// ---- Districts Tab ----
+// Districts are seeded from data/store_zone.csv and aren't created/destroyed
+// through the UI. The admin panel only exposes IsChicagoLand (drives the
+// transfer-site bypass via Order → Store → Zone → District), IsActive, and
+// the display name.
+
+function DistrictsTab({ showCompany, companyName }: CompanyDisplay) {
+  const [districts, setDistricts] = useState<District[]>([])
+  const [loading, setLoading]     = useState(true)
+  const [savingId, setSavingId]   = useState<string | null>(null)
+  const [error, setError]         = useState<string | null>(null)
+
+  const { sorted, sortKey, sortDir, toggle } = useSortedRows(districts, {
+    accessors: { company: (d) => companyName(d.companyId) },
+  })
+
+  useEffect(() => {
+    getDistricts().then(setDistricts).finally(() => setLoading(false))
+  }, [])
+
+  async function toggleChicagoLand(d: District) {
+    setSavingId(d.id); setError(null)
+    const next = !d.isChicagoLand
+    // Optimistic flip — revert on failure so the operator sees the row snap
+    // back rather than getting a misleading "saved" with stale state.
+    setDistricts((prev) => prev.map((r) => (r.id === d.id ? { ...r, isChicagoLand: next } : r)))
+    try {
+      await updateDistrict(d.id, { isChicagoLand: next })
+    } catch {
+      setError(`Failed to update district ${d.number}.`)
+      setDistricts((prev) => prev.map((r) => (r.id === d.id ? { ...r, isChicagoLand: !next } : r)))
+    } finally {
+      setSavingId(null)
+    }
+  }
+
+  async function toggleActive(d: District) {
+    setSavingId(d.id); setError(null)
+    const next = !d.isActive
+    setDistricts((prev) => prev.map((r) => (r.id === d.id ? { ...r, isActive: next } : r)))
+    try {
+      await updateDistrict(d.id, { isActive: next })
+    } catch {
+      setError(`Failed to update district ${d.number}.`)
+      setDistricts((prev) => prev.map((r) => (r.id === d.id ? { ...r, isActive: !next } : r)))
+    } finally {
+      setSavingId(null)
+    }
+  }
+
+  if (loading) return <div className="flex items-center justify-center h-40 text-gray-400">Loading...</div>
+
+  return (
+    <div className="space-y-3">
+      {error && <p className="text-sm text-red-600">{error}</p>}
+      <p className="text-xs text-gray-500">
+        Districts are seeded from <code>data/store_zone.csv</code> and can't be created or removed here.
+        Toggle <strong>ChicagoLand</strong> to mark districts that sit inside the Chicago-Naperville-Elgin MSA —
+        used by the transfer-site bypass on the routing side.
+      </p>
+
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
+            <tr>
+              {showCompany && (
+                <SortHeader label="Company" sortKey="company" activeKey={sortKey} dir={sortDir} onClick={() => toggle('company')} />
+              )}
+              <SortHeader label="#"     sortKey="number"    activeKey={sortKey} dir={sortDir} onClick={() => toggle('number')} />
+              <SortHeader label="Name"  sortKey="name"      activeKey={sortKey} dir={sortDir} onClick={() => toggle('name')} />
+              <SortHeader label="Zones" sortKey="zoneCount" activeKey={sortKey} dir={sortDir} onClick={() => toggle('zoneCount')} />
+              <th className="px-4 py-3 text-left font-medium">ChicagoLand</th>
+              <th className="px-4 py-3 text-left font-medium">Active</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {sorted.map((d) => (
+              <tr key={d.id} className="hover:bg-gray-50">
+                {showCompany && (
+                  <td className="px-4 py-3 text-gray-500 text-xs">{companyName(d.companyId)}</td>
+                )}
+                <td className="px-4 py-3 text-gray-700 font-mono text-xs">{d.number}</td>
+                <td className="px-4 py-3 font-medium text-gray-900">{d.name}</td>
+                <td className="px-4 py-3 text-gray-500 text-xs">{d.zoneCount}</td>
+                <td className="px-4 py-3">
+                  <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={d.isChicagoLand}
+                      disabled={savingId === d.id}
+                      onChange={() => toggleChicagoLand(d)}
+                    />
+                    {d.isChicagoLand && (
+                      <span className="inline-block px-2 py-0.5 text-[10px] font-medium rounded bg-sky-100 text-sky-700">
+                        ChicagoLand
+                      </span>
+                    )}
+                  </label>
+                </td>
+                <td className="px-4 py-3">
+                  <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={d.isActive}
+                      disabled={savingId === d.id}
+                      onChange={() => toggleActive(d)}
+                    />
+                    <span className="text-xs text-gray-500">{d.isActive ? 'Active' : 'Inactive'}</span>
+                  </label>
+                </td>
+              </tr>
+            ))}
+            {sorted.length === 0 && (
+              <tr><td colSpan={showCompany ? 6 : 5} className="px-4 py-8 text-center text-gray-400">No districts found.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 // ---- Edit Store Dialog ----
 // Light modal that pre-fills from the selected row and PATCH-sends the
 // whole form on save. Address fields are split out so the operator can
@@ -1532,6 +1714,7 @@ type WarehouseForm = {
   // String-typed so the controlled number input stays clean (no
   // NaN-vs-empty headaches). Validated on save.
   loadingWaitMinutes: string
+  isChicagoLand: boolean
   mondayPickupTime: string
   tuesdayPickupTime: string
   wednesdayPickupTime: string
@@ -1545,6 +1728,7 @@ const emptyWarehouseForm: WarehouseForm = {
   businessName: '', alternateName: '', address: '', city: '', state: '', zip: '',
   licenseNumber: '', legacyLicenseNumber: '',
   loadingWaitMinutes: '15',
+  isChicagoLand: false,
   mondayPickupTime: '', tuesdayPickupTime: '', wednesdayPickupTime: '',
   thursdayPickupTime: '', fridayPickupTime: '', saturdayPickupTime: '', sundayPickupTime: '',
 }
@@ -1589,6 +1773,7 @@ function WarehousesTab({ showCompany }: CompanyDisplay) {
       licenseNumber: w.licenseNumber ?? '',
       legacyLicenseNumber: w.legacyLicenseNumber ?? '',
       loadingWaitMinutes: String(w.loadingWaitMinutes ?? 15),
+      isChicagoLand: !!w.isChicagoLand,
       mondayPickupTime: w.mondayPickupTime ?? '',
       tuesdayPickupTime: w.tuesdayPickupTime ?? '',
       wednesdayPickupTime: w.wednesdayPickupTime ?? '',
@@ -1674,6 +1859,20 @@ function WarehousesTab({ showCompany }: CompanyDisplay) {
                 Minutes the van waits at this warehouse for loading. Applied to pickup round trips and any DirectDelivery / Legacy route that visits here. 0–240.
               </p>
             </div>
+            <label className="flex items-start gap-2 text-sm text-gray-700 select-none">
+              <input
+                type="checkbox"
+                checked={form.isChicagoLand}
+                onChange={(e) => setForm((prev) => ({ ...prev, isChicagoLand: e.target.checked }))}
+                className="mt-0.5"
+              />
+              <span>
+                ChicagoLand
+                <span className="block text-[11px] text-gray-400">
+                  Warehouse sits inside the Chicago-Naperville-Elgin MSA. Used to drive the transfer-site bypass on non-ChicagoLand pickups.
+                </span>
+              </span>
+            </label>
           </div>
 
           {/* Address */}
@@ -1693,7 +1892,10 @@ function WarehousesTab({ showCompany }: CompanyDisplay) {
             <label className="block text-sm font-medium text-gray-700 mb-2">Tentative Weekly Pickup Schedule</label>
             <div className="grid grid-cols-7 gap-2">
               {DAYS.map((day, i) => {
-                const key = `${day}PickupTime` as keyof WarehouseForm
+                // Narrow to the day-specific keys (all string-valued) so the
+                // controlled <input value> doesn't widen to include
+                // isChicagoLand's boolean.
+                const key = `${day}PickupTime` as `${typeof DAYS[number]}PickupTime`
                 return (
                   <div key={day}>
                     <label className="block text-xs font-medium text-gray-500 mb-1 text-center">{DAY_LABELS[i]}</label>
@@ -1738,6 +1940,7 @@ function WarehousesTab({ showCompany }: CompanyDisplay) {
               <SortHeader label="Address"         sortKey="address"        activeKey={sortKey} dir={sortDir} onClick={() => toggle('address')} />
               <SortHeader label="License #"       sortKey="licenseNumber"  activeKey={sortKey} dir={sortDir} onClick={() => toggle('licenseNumber')} />
               <SortHeader label="Pickup Schedule" sortKey="pickupSchedule" activeKey={sortKey} dir={sortDir} onClick={() => toggle('pickupSchedule')} />
+              <th className="px-4 py-3 text-left font-medium">Flags</th>
               <th className="px-4 py-3 text-left font-medium"></th>
             </tr>
           </thead>
@@ -1775,6 +1978,13 @@ function WarehousesTab({ showCompany }: CompanyDisplay) {
                   </div>
                 </td>
                 <td className="px-4 py-3">
+                  {w.isChicagoLand && (
+                    <span className="inline-block px-2 py-0.5 text-[10px] font-medium rounded bg-sky-100 text-sky-700">
+                      ChicagoLand
+                    </span>
+                  )}
+                </td>
+                <td className="px-4 py-3">
                   <div className="flex gap-2">
                     <button onClick={() => startEdit(w)}
                       className="text-xs text-brand-600 hover:text-brand-800">Edit</button>
@@ -1785,7 +1995,7 @@ function WarehousesTab({ showCompany }: CompanyDisplay) {
               </tr>
             ))}
             {sortedWarehouses.length === 0 && (
-              <tr><td colSpan={showCompany ? 6 : 5} className="px-4 py-8 text-center text-gray-400">No warehouses found.</td></tr>
+              <tr><td colSpan={showCompany ? 7 : 6} className="px-4 py-8 text-center text-gray-400">No warehouses found.</td></tr>
             )}
           </tbody>
         </table>

@@ -218,6 +218,12 @@ export interface Hub {
   /** Minutes pickup vans wait at the hub for orders to be sorted before
    *  per-zone delivery vans dispatch. Editable per hub. */
   sortingWaitMinutes: number
+  /** True for the single hub designated as the sorting/transfer site for the
+   *  company (HUB_ROM today). Only transfer-site hubs may receive warehouse
+   *  pickups for multi-zone sort. */
+  isTransferSite?: boolean
+  /** True when this hub sits inside the Chicago-Naperville-Elgin MSA. */
+  isChicagoLand?: boolean
   isActive: boolean
 }
 
@@ -237,6 +243,8 @@ export interface Warehouse {
   zip: string
   licenseNumber?: string
   legacyLicenseNumber?: string
+  /** True when this warehouse is inside the Chicago-Naperville-Elgin MSA. */
+  isChicagoLand?: boolean
   isActive: boolean
   mondayPickupTime?: string
   tuesdayPickupTime?: string
@@ -245,6 +253,19 @@ export interface Warehouse {
   fridayPickupTime?: string
   saturdayPickupTime?: string
   sundayPickupTime?: string
+}
+
+/** District is seeded from store_zone.csv and only its flags are editable
+ *  through the admin panel — Districts cannot be created or destroyed via
+ *  the UI. */
+export interface District {
+  id: string
+  companyId: string
+  number: number
+  name: string
+  isChicagoLand: boolean
+  isActive: boolean
+  zoneCount: number
 }
 
 export type BatchStatus = 'Open' | 'Scheduled' | 'RouteOptimized' | 'InTransit' | 'Completed' | 'Cancelled'

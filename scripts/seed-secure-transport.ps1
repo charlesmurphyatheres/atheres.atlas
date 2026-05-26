@@ -91,11 +91,13 @@ if ($hubCount -gt 0) {
         $state = $h.'State' -replace "'", "''"
         $zip = $h.'Zip' -replace "'", "''"
         $csvId = $h.'ID'
+        $isTransferSite = if ($h.PSObject.Properties['IsTransferSite'] -and [bool]::Parse($h.IsTransferSite)) { 1 } else { 0 }
+        $isChicagoLand  = if ($h.PSObject.Properties['IsChicagoLand']  -and [bool]::Parse($h.IsChicagoLand))  { 1 } else { 0 }
 
         # Store the CSV ID in FormattedAddress temporarily for van lookup
         Invoke-Sql -Query @"
-INSERT INTO Hubs (Id, CompanyId, Name, Address, City, State, Zip, FormattedAddress, IsActive, CreatedAt, UpdatedAt)
-VALUES ('$id', '$companyId', N'$name', N'$address', N'$city', '$state', '$zip', '$csvId', 1, '$now', '$now')
+INSERT INTO Hubs (Id, CompanyId, Name, Address, City, State, Zip, FormattedAddress, IsTransferSite, IsChicagoLand, IsActive, CreatedAt, UpdatedAt)
+VALUES ('$id', '$companyId', N'$name', N'$address', N'$city', '$state', '$zip', '$csvId', $isTransferSite, $isChicagoLand, 1, '$now', '$now')
 "@ -ConnStr $ConnectionString
         $imported++
     }
