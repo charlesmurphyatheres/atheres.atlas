@@ -317,11 +317,6 @@ public class RouteOptimizationAgent
         var effectiveDepart = scheduledDepart ?? deliveryStart;
         var runningTime     = effectiveDepart.AddSeconds(pickupDuration + warehouseWaitSeconds);
 
-        // Start point depends on RouteType. DirectDelivery begins at the
-        // warehouse (no hub touch beforehand). Everything else starts at
-        // the hub.
-        var startIsWarehouse = message.Kind == RouteType.DirectDelivery && warehouse is not null;
-
         var route = new DeliveryRoute
         {
             Id = message.RouteRequestId,
@@ -333,14 +328,21 @@ public class RouteOptimizationAgent
             ZoneId = message.ZoneId,
             ScheduledDepartTime = scheduledDepart,
             DeliveryDate = message.DeliveryDate,
-            // StartAddress / EndAddress are the human-readable fall-back —
-            // always store the formatted/full address for display, not the
-            // "lat,lng" string we passed to Directions.
-            StartAddress  = startIsWarehouse
-                ? warehouse!.FormattedAddress ?? warehouse.FullAddress
-                : hub.FormattedAddress ?? hub.FullAddress,
-            StartLatitude  = startIsWarehouse ? (warehouse!.Latitude  ?? 0) : (hub.Latitude  ?? 0),
-            StartLongitude = startIsWarehouse ? (warehouse!.Longitude ?? 0) : (hub.Longitude ?? 0),
+            // Start / End are the driver's home base — always the hub,
+            // regardless of RouteType. DirectDelivery's optimizer geometry
+            // begins at the warehouse (we skip the Hub→Warehouse Google
+            // query to save an API call), but conceptually the driver
+            // starts and ends their day at the hub. The warehouse is a
+            // pickup stop surfaced separately on the route via
+            // WarehouseId / the WarehousePickup projection — not the
+            // route's depot. Labelling the warehouse as "Start · Depot"
+            // both confused operators (the warehouse address rendered
+            // next to the green S chip alongside the amber W "Pickup"
+            // row) and conflicted with the home-hub semantics used
+            // everywhere else (Truck.HubId, returns-to-hub, etc.).
+            StartAddress  = hub.FormattedAddress ?? hub.FullAddress,
+            StartLatitude  = hub.Latitude  ?? 0,
+            StartLongitude = hub.Longitude ?? 0,
             EndAddress = hub.FormattedAddress ?? hub.FullAddress,
             EndLatitude = hub.Latitude ?? 0,
             EndLongitude = hub.Longitude ?? 0,
