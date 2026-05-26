@@ -149,34 +149,58 @@ public class OrderImportAgent
                          && w.Companies.Any(c => c.Id == company.Id))
                 .ToDictionaryAsync(w => w.Id, ct);
 
-        // Pre-fetch every sales-order number that already exists for this
-        // company so we can reject duplicates before issuing INSERTs. Same
-        // sales order = same physical order, so we never want two rows.
-        // Comparison is case-insensitive to match how operators paste
-        // numbers ("SO-123" vs "so-123" should still collide).
+        // Pre-fetch every order in this company whose SalesOrderNumber OR
+        // PurchaseOrderNumber matches one of the incoming rows. We overwrite
+        // those rows in-place instead of inserting a duplicate — same
+        // SO#/PO# = same physical order, and the import semantics are
+        // "the new row IS the source of truth." Comparison is case-
+        // insensitive so "SO-123" matches "so-123" the way operators
+        // expect when they paste from a spreadsheet.
         var batchSalesOrderNumbers = dto.Rows
             .Select(r => r.SalesOrderNumber?.Trim())
             .Where(s => !string.IsNullOrWhiteSpace(s))
             .Select(s => s!)
             .ToList();
+        var batchPurchaseOrderNumbers = dto.Rows
+            .Select(r => r.PurchaseOrderNumber?.Trim())
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s!)
+            .ToList();
 
-        var existingSalesOrders = batchSalesOrderNumbers.Count == 0
-            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            : new HashSet<string>(
-                await _db.Orders.IgnoreQueryFilters()
-                    .Where(o => o.CompanyId == company.Id
-                             && o.SalesOrderNumber != null
-                             && batchSalesOrderNumbers.Contains(o.SalesOrderNumber))
-                    .Select(o => o.SalesOrderNumber!)
-                    .ToListAsync(ct),
-                StringComparer.OrdinalIgnoreCase);
+        var existingMatches = (batchSalesOrderNumbers.Count == 0 && batchPurchaseOrderNumbers.Count == 0)
+            ? new List<Order>()
+            : await _db.Orders.IgnoreQueryFilters()
+                .Where(o => o.CompanyId == company.Id
+                    && ((o.SalesOrderNumber != null && batchSalesOrderNumbers.Contains(o.SalesOrderNumber))
+                     || (o.PurchaseOrderNumber != null && batchPurchaseOrderNumbers.Contains(o.PurchaseOrderNumber))))
+                .ToListAsync(ct);
 
-        // Track sales orders we've staged in this single import so the
-        // batch can't carry an internal duplicate either.
-        var batchSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Two lookup maps so a row can match by either SO# or PO# in O(1).
+        // The same Order may appear in both when it carries both numbers.
+        var existingBySalesOrder    = new Dictionary<string, Order>(StringComparer.OrdinalIgnoreCase);
+        var existingByPurchaseOrder = new Dictionary<string, Order>(StringComparer.OrdinalIgnoreCase);
+        foreach (var existing in existingMatches)
+        {
+            if (!string.IsNullOrWhiteSpace(existing.SalesOrderNumber))
+                existingBySalesOrder[existing.SalesOrderNumber] = existing;
+            if (!string.IsNullOrWhiteSpace(existing.PurchaseOrderNumber))
+                existingByPurchaseOrder[existing.PurchaseOrderNumber] = existing;
+        }
 
-        var errors = new List<ImportRowError>();
-        var orders = new List<Order>();
+        // Track SO#/PO# we've staged in this single import so a batch
+        // carrying an internal duplicate still errors — silently merging
+        // two rows that disagree would lose data.
+        var batchSeenSalesOrders    = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var batchSeenPurchaseOrders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Track which existing orders we've already targeted for overwrite
+        // in this batch. Catches the case where row 1 matches order X by
+        // SO# and row 2 matches the same X by PO# — both would silently
+        // clobber each other otherwise.
+        var batchOverwrittenIds     = new HashSet<Guid>();
+
+        var errors          = new List<ImportRowError>();
+        var insertedOrders  = new List<Order>();
+        var overwrittenOrders = new List<Order>();
 
         for (var i = 0; i < dto.Rows.Count; i++)
         {
@@ -233,71 +257,156 @@ public class OrderImportAgent
                 continue;
             }
 
-            var salesOrder = NullIfBlank(row.SalesOrderNumber);
-            if (salesOrder is not null)
+            var salesOrder    = NullIfBlank(row.SalesOrderNumber);
+            var purchaseOrder = NullIfBlank(row.PurchaseOrderNumber);
+
+            // Within-batch dedup — two rows in the same upload sharing an
+            // SO#/PO# is almost always a CSV mistake; merging silently
+            // would lose whichever variant comes later in the file.
+            if (salesOrder is not null && !batchSeenSalesOrders.Add(salesOrder))
             {
-                if (existingSalesOrders.Contains(salesOrder))
-                {
-                    errors.Add(new ImportRowError(i, $"Sales order '{salesOrder}' already exists for this company."));
-                    continue;
-                }
-                if (!batchSeen.Add(salesOrder))
-                {
-                    errors.Add(new ImportRowError(i, $"Sales order '{salesOrder}' is duplicated within this import."));
-                    continue;
-                }
+                errors.Add(new ImportRowError(i, $"Sales order '{salesOrder}' is duplicated within this import."));
+                continue;
             }
+            if (purchaseOrder is not null && !batchSeenPurchaseOrders.Add(purchaseOrder))
+            {
+                errors.Add(new ImportRowError(i, $"Purchase order '{purchaseOrder}' is duplicated within this import."));
+                continue;
+            }
+
+            // Match this row against any existing order in the company.
+            // Either SO# or PO# is sufficient; if both match but point to
+            // different orders the row is ambiguous and we error rather
+            // than silently overwrite the wrong one.
+            Order? matchBySo = (salesOrder    is not null && existingBySalesOrder.TryGetValue(salesOrder, out var so)) ? so : null;
+            Order? matchByPo = (purchaseOrder is not null && existingByPurchaseOrder.TryGetValue(purchaseOrder, out var po)) ? po : null;
+            if (matchBySo is not null && matchByPo is not null && matchBySo.Id != matchByPo.Id)
+            {
+                errors.Add(new ImportRowError(i,
+                    $"Row matches two different existing orders: SO '{salesOrder}' → {matchBySo.Id}, PO '{purchaseOrder}' → {matchByPo.Id}. Resolve the conflict before re-importing."));
+                continue;
+            }
+            var existing = matchBySo ?? matchByPo;
+            if (existing is not null && !batchOverwrittenIds.Add(existing.Id))
+            {
+                errors.Add(new ImportRowError(i,
+                    $"Multiple rows in this import target the same existing order ({existing.Id}). Merge them before re-importing."));
+                continue;
+            }
+
+            // Initial status reset on every imported row (insert OR
+            // overwrite): when the operator picked Scheduled, route
+            // immediately — unless the order is more than a day old, in
+            // which case it falls through to RouteOmitted (consistent
+            // with every other "schedule this" path in the system).
+            var resolvedStatus = requestedInitial == OrderStatus.Scheduled
+                ? (RoutingPolicy.IsTooOldToRoute(orderDate, DateTime.UtcNow)
+                    ? OrderStatus.RouteOmitted
+                    : OrderStatus.Scheduled)
+                : OrderStatus.Ordered;
 
             // Order address comes from the matched Store, not the CSV. The
             // store has already been geocoded so route optimization gets
             // real coordinates, and "address on the order" stays consistent
             // with the store master data even when the CSV has a slightly
             // different formatting.
-            var order = new Order
+            if (existing is not null)
             {
-                CompanyId           = company.Id,
-                WarehouseId         = rowWarehouseId,
-                StoreId             = matchedStore.Id,
-                StoreLicenseNumber  = matchedStore.LicenseNumber,
-                StoreName           = matchedStore.Name,
-                Address             = matchedStore.Address,
-                City                = matchedStore.City,
-                State               = matchedStore.State,
-                Zip                 = matchedStore.Zip,
-                County              = matchedStore.County ?? string.Empty,
-                LicenseNumber       = matchedStore.LicenseNumber ?? string.Empty,
-                Customer            = NullIfBlank(row.Customer),
-                SalesOrderNumber    = salesOrder,
-                PurchaseOrderNumber = NullIfBlank(row.PurchaseOrderNumber),
-                Email               = matchedStore.Email ?? string.Empty,
-                Phone               = matchedStore.Phone,
-                Latitude            = matchedStore.Latitude,
-                Longitude           = matchedStore.Longitude,
-                FormattedAddress    = matchedStore.FormattedAddress,
-                OrderDate           = orderDate,
-                // When the operator picked Scheduled, route immediately —
-                // unless the order is more than a day old, in which case
-                // we record it as RouteOmitted (consistent with every
-                // other "schedule this" path in the system).
-                Status              = requestedInitial == OrderStatus.Scheduled
-                    ? (RoutingPolicy.IsTooOldToRoute(orderDate, DateTime.UtcNow)
-                        ? OrderStatus.RouteOmitted
-                        : OrderStatus.Scheduled)
-                    : OrderStatus.Ordered,
-                Notes               = "Imported via CSV",
-            };
+                // Overwrite the existing order in place. Id / CompanyId /
+                // CreatedAt stay so FK relationships and the audit trail
+                // survive; every domain field gets the new value. Any
+                // transient routing state (batch, route, sequence,
+                // confirmation) is wiped because the row's content has
+                // changed — the prior optimization is stale.
+                existing.WarehouseId            = rowWarehouseId;
+                existing.StoreId                = matchedStore.Id;
+                existing.StoreLicenseNumber     = matchedStore.LicenseNumber;
+                existing.StoreName              = matchedStore.Name;
+                existing.Address                = matchedStore.Address;
+                existing.City                   = matchedStore.City;
+                existing.State                  = matchedStore.State;
+                existing.Zip                    = matchedStore.Zip;
+                existing.County                 = matchedStore.County ?? string.Empty;
+                existing.LicenseNumber          = matchedStore.LicenseNumber ?? string.Empty;
+                existing.Customer               = NullIfBlank(row.Customer);
+                existing.SalesOrderNumber       = salesOrder;
+                existing.PurchaseOrderNumber    = purchaseOrder;
+                existing.Email                  = matchedStore.Email ?? string.Empty;
+                existing.Phone                  = matchedStore.Phone;
+                existing.Latitude               = matchedStore.Latitude;
+                existing.Longitude              = matchedStore.Longitude;
+                existing.FormattedAddress       = matchedStore.FormattedAddress;
+                existing.OrderDate              = orderDate;
+                existing.Status                 = resolvedStatus;
+                existing.Notes                  = "Re-imported via CSV";
+                existing.UpdatedAt              = DateTime.UtcNow;
 
-            orders.Add(order);
+                // Reset transient routing/confirmation state — the prior
+                // route was optimized for the prior data and is no longer
+                // valid. A Scheduled overwrite will fan out through
+                // RouteScheduler below and re-optimize.
+                existing.BatchId                = null;
+                existing.RouteId                = null;
+                existing.StopSequence           = null;
+                existing.ExpectedDeliveryDate   = null;
+                existing.ConfirmationDeadline   = null;
+                existing.ConfirmationToken      = null;
+                existing.ConfirmedAt            = null;
+                existing.RescheduleCount        = 0;
+                existing.DeferredAt             = null;
+                existing.OriginalRouteId        = null;
+                existing.IsAtHub                = false;
+                existing.ValidationErrors       = null;
+
+                overwrittenOrders.Add(existing);
+            }
+            else
+            {
+                var order = new Order
+                {
+                    CompanyId           = company.Id,
+                    WarehouseId         = rowWarehouseId,
+                    StoreId             = matchedStore.Id,
+                    StoreLicenseNumber  = matchedStore.LicenseNumber,
+                    StoreName           = matchedStore.Name,
+                    Address             = matchedStore.Address,
+                    City                = matchedStore.City,
+                    State               = matchedStore.State,
+                    Zip                 = matchedStore.Zip,
+                    County              = matchedStore.County ?? string.Empty,
+                    LicenseNumber       = matchedStore.LicenseNumber ?? string.Empty,
+                    Customer            = NullIfBlank(row.Customer),
+                    SalesOrderNumber    = salesOrder,
+                    PurchaseOrderNumber = purchaseOrder,
+                    Email               = matchedStore.Email ?? string.Empty,
+                    Phone               = matchedStore.Phone,
+                    Latitude            = matchedStore.Latitude,
+                    Longitude           = matchedStore.Longitude,
+                    FormattedAddress    = matchedStore.FormattedAddress,
+                    OrderDate           = orderDate,
+                    Status              = resolvedStatus,
+                    Notes               = "Imported via CSV",
+                };
+
+                _db.Orders.Add(order);
+                insertedOrders.Add(order);
+            }
         }
 
-        if (orders.Count == 0)
+        // The combined list — order matters only for the response payload
+        // (insertedOrders are reported first, then overwrites). Save once;
+        // EF tracks the inserts (Added by AddRange below) and the
+        // overwrites (Modified — already tracked via the existing-entity
+        // mutations above) in a single round trip.
+        var allTouched = insertedOrders.Concat(overwrittenOrders).ToList();
+        if (allTouched.Count == 0)
             return new BadRequestObjectResult(new { error = "No valid rows to import.", errors });
 
-        _db.Orders.AddRange(orders);
         await _db.SaveChangesAsync(ct);
 
         // Single batched optimization run for everything that came in as
-        // Scheduled. RouteScheduler groups by warehouse and chunks per
+        // Scheduled — both fresh inserts AND overwrites of pre-existing
+        // orders. RouteScheduler groups by warehouse and chunks per
         // company.MaxStopsPerRoute, so even a 200-row Scheduled import
         // produces a small, bounded number of optimization messages —
         // never one per order.
@@ -308,8 +417,8 @@ public class OrderImportAgent
         var hubsGeocoded       = 0;
         var warehousesGeocoded = 0;
         var geocodeFailures    = 0;
-        var routeOmittedCount  = orders.Count(o => o.Status == OrderStatus.RouteOmitted);
-        var freshlyScheduled   = orders.Where(o => o.Status == OrderStatus.Scheduled).ToList();
+        var routeOmittedCount  = allTouched.Count(o => o.Status == OrderStatus.RouteOmitted);
+        var freshlyScheduled   = allTouched.Where(o => o.Status == OrderStatus.Scheduled).ToList();
         if (freshlyScheduled.Count > 0)
         {
             try
@@ -336,8 +445,9 @@ public class OrderImportAgent
                 _log.LogError(ex, "CSV import: scheduler enqueue failed; orders left as Scheduled.");
                 return new ObjectResult(new
                 {
-                    created      = orders.Count,
-                    orderIds     = orders.Select(o => o.Id),
+                    created      = insertedOrders.Count,
+                    overwritten  = overwrittenOrders.Count,
+                    orderIds     = allTouched.Select(o => o.Id),
                     routesQueued = 0,
                     routeOmitted = routeOmittedCount,
                     errors,
@@ -348,15 +458,16 @@ public class OrderImportAgent
         }
 
         _log.LogInformation(
-            "CSV import: {Created} orders created for company {Company} ({Errors} skipped, {Routes} run(s) queued, geocoded {Stores}/{Hubs}/{Warehouses} stores/hubs/warehouses, {Ungeocoded} ungeocoded skipped, NoActiveHub={NoHub})",
-            orders.Count, company.Id, errors.Count, routesQueued,
+            "CSV import: {Created} created, {Overwritten} overwritten for company {Company} ({Errors} skipped, {Routes} run(s) queued, geocoded {Stores}/{Hubs}/{Warehouses} stores/hubs/warehouses, {Ungeocoded} ungeocoded skipped, NoActiveHub={NoHub})",
+            insertedOrders.Count, overwrittenOrders.Count, company.Id, errors.Count, routesQueued,
             storesGeocoded, hubsGeocoded, warehousesGeocoded,
             ordersUngeocoded, noActiveHub);
 
         return new OkObjectResult(new
         {
-            created            = orders.Count,
-            orderIds           = orders.Select(o => o.Id),
+            created            = insertedOrders.Count,
+            overwritten        = overwrittenOrders.Count,
+            orderIds           = allTouched.Select(o => o.Id),
             routesQueued,
             ordersUngeocoded,
             noActiveHub,

@@ -281,15 +281,12 @@ function StopEditor({ route, onUpdate }: { route: Route; onUpdate: (r: Route) =>
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-      <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-        <div>
-          <h2 className="font-semibold text-gray-900">{headerCountLabel}</h2>
-          <p className="text-xs text-gray-500 mt-0.5">{route.startAddress} → {route.endAddress}</p>
-          {headerTimeStrip && (
-            <p className="text-xs font-medium text-gray-700 mt-1">{headerTimeStrip}</p>
-          )}
-        </div>
-        <div className="text-xs text-gray-400">{route.id.slice(0, 8)}</div>
+      <div className="px-5 py-4 border-b border-gray-100">
+        <h2 className="font-semibold text-gray-900">{headerCountLabel}</h2>
+        <p className="text-xs text-gray-500 mt-0.5">{route.startAddress} → {route.endAddress}</p>
+        {headerTimeStrip && (
+          <p className="text-xs font-medium text-gray-700 mt-1">{headerTimeStrip}</p>
+        )}
       </div>
 
       <div className="divide-y divide-gray-50">

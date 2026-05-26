@@ -288,25 +288,14 @@ public class RouteOptimizationAgent
         var totalDistance  = pickupDistance + deliveryLoop.TotalDistanceMeters;
         var totalDuration  = pickupDuration + warehouseWaitSeconds + deliveryLoop.TotalDurationSeconds;
 
-        // Build delivery times starting from window start. The hub→warehouse
-        // drive (Legacy) and the warehouse loading wait both eat into the
-        // window before the first delivery is even attempted, so include
-        // both in the running clock.
+        // Resolve when this route actually leaves first — every per-stop
+        // ETA below builds on top of it. For ZonedDelivery vans the
+        // scheduler stamps ScheduledDepartTime = pickup-return + sort
+        // wait on the message; the van can't begin delivering until then
+        // because it doesn't physically have the cargo. For
+        // DirectDelivery / Legacy / Pickup the message either carries a
+        // pre-computed value or we fall back to the window start.
         var deliveryStart = message.DeliveryDate.Date.Add(deliveryWindowStart);
-        var runningTime   = deliveryStart.AddSeconds(pickupDuration + warehouseWaitSeconds);
-
-        // Start point depends on RouteType. DirectDelivery begins at the
-        // warehouse (no hub touch beforehand). Everything else starts at
-        // the hub.
-        var startIsWarehouse = message.Kind == RouteType.DirectDelivery && warehouse is not null;
-
-        // ScheduledDepartTime: prefer the scheduler's pre-computed value
-        // (which chains ZonedDelivery off the paired Pickup van's
-        // Haversine-estimated return + sort wait, so delivery vans
-        // actually wait for the pickup van to return). Fall back to a
-        // direct computation if the scheduler didn't stamp one — this
-        // keeps backwards compat for any legacy callers that don't yet
-        // pass ScheduledDepartTime on the message.
         DateTime? scheduledDepart = message.ScheduledDepartTime;
         if (scheduledDepart is null)
         {
@@ -315,6 +304,23 @@ public class RouteOptimizationAgent
             else if (message.Kind == RouteType.DirectDelivery)
                 scheduledDepart = deliveryStart;
         }
+
+        // Anchor the running clock to scheduledDepart (when set) instead
+        // of the bare delivery-window start — otherwise a ZonedDelivery
+        // van's stop ETAs would read as if it left at 08:00 sharp, even
+        // though the van actually waits at HUB_ROM for the pickup-return
+        // plus sort wait before it can dispatch. The pickup leg time +
+        // warehouse loading wait still stack on top for the route types
+        // that physically visit a warehouse on the way out (Legacy with
+        // warehouse, DirectDelivery); for ZonedDelivery both are 0 so
+        // the running clock starts exactly at scheduledDepart.
+        var effectiveDepart = scheduledDepart ?? deliveryStart;
+        var runningTime     = effectiveDepart.AddSeconds(pickupDuration + warehouseWaitSeconds);
+
+        // Start point depends on RouteType. DirectDelivery begins at the
+        // warehouse (no hub touch beforehand). Everything else starts at
+        // the hub.
+        var startIsWarehouse = message.Kind == RouteType.DirectDelivery && warehouse is not null;
 
         var route = new DeliveryRoute
         {

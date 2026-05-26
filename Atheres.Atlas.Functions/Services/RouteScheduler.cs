@@ -364,28 +364,25 @@ public class RouteScheduler : IRouteScheduler
         foreach (var group in groups)
         {
             // Resolve this group's warehouse (may be null for hub-originating
-            // orders) once up front — both the bypass check and the hub-pick
-            // need it.
+            // orders) once up front.
             Warehouse? whForGroup = null;
             if (group.Key.WarehouseId.HasValue)
                 warehousesById.TryGetValue(group.Key.WarehouseId.Value, out whForGroup);
-
             var warehouseLabel = whForGroup?.BusinessName ?? "(no warehouse)";
+            var warehouseIsChicagoLand = whForGroup?.IsChicagoLand ?? false;
 
-            // Inspect the whole warehouse-group's zone footprint. The dispatch
-            // shape depends on three things, evaluated in order:
-            //   1. Bypass-eligible (non-ChicagoLand warehouse + every order
-            //      delivers to a non-ChicagoLand district) → DirectDelivery
-            //      anchored at the closest NON-transfer-site hub. Skips the
-            //      transfer site entirely; multi-zone is allowed.
-            //   2. Single-zone (or all-unzoned) → DirectDelivery anchored at
-            //      the closest hub. Same hub-bypass route shape.
-            //   3. Multi-zone, transfer site required → Pickup van to the
-            //      transfer-site hub + per-zone ZonedDelivery vans after the
-            //      sort wait.
-            var ordersByZone = new Dictionary<Guid, List<Order>>();
-            var unzonedOrders = new List<Order>();
-            var anyOrderIsChicagoLand = false;
+            // ---- Inspect the zone footprint AND partition by ChicagoLand
+            // status. The partition only matters for non-ChicagoLand
+            // warehouses (the rule set below); for everyone else we just
+            // use the zone footprint as before. Unzoned orders bundle
+            // with the non-ChicagoLand subset — they default to
+            // IsChicagoLand=false per the entity defaults.
+            var ordersByZone        = new Dictionary<Guid, List<Order>>();
+            var unzonedOrders       = new List<Order>();
+            var chicagoOrders       = new List<Order>();
+            var outstateOrders      = new List<Order>();
+            var chicagoZones        = new HashSet<Guid>();
+            var outstateZonedCount  = 0;
             foreach (var o in group)
             {
                 Guid? zoneId = o.StoreId.HasValue
@@ -399,286 +396,251 @@ public class RouteScheduler : IRouteScheduler
                     list.Add(o);
                     totalZones.Add(zoneId.Value);
 
-                    if (zoneDetailById.TryGetValue(zoneId.Value, out var zd) && zd.DistrictIsChicagoLand)
-                        anyOrderIsChicagoLand = true;
+                    var isCL = zoneDetailById.TryGetValue(zoneId.Value, out var zd) && zd.DistrictIsChicagoLand;
+                    if (isCL)
+                    {
+                        chicagoOrders.Add(o);
+                        chicagoZones.Add(zoneId.Value);
+                    }
+                    else
+                    {
+                        outstateOrders.Add(o);
+                        outstateZonedCount++;
+                    }
                 }
                 else
                 {
                     unzonedOrders.Add(o);
-                    // Unzoned orders default to non-ChicagoLand (per the
-                    // entity default) — they don't disqualify the bypass.
+                    outstateOrders.Add(o); // unzoned → non-ChicagoLand bucket
                 }
             }
 
-            var isSingleZone   = ordersByZone.Count <= 1 && unzonedOrders.Count == 0;
-            var warehouseIsChicagoLand = whForGroup?.IsChicagoLand ?? false;
-            var bypassEligible = whForGroup is not null
-                              && !warehouseIsChicagoLand
-                              && !anyOrderIsChicagoLand
-                              && !isSingleZone; // single-zone already uses DirectDelivery → no separate bypass needed
+            var isSingleZone = ordersByZone.Count <= 1 && unzonedOrders.Count == 0;
+            var deliveryStart = group.Key.OrderDate.Date.Add(deliveryWindowStart);
 
-            // Hub selection. We pick AFTER the bypass calculation because the
-            // bypass dictates whether we want the transfer-site hub or
-            // explicitly NOT the transfer-site hub.
-            Guid hubIdForGroup;
-            var hasWarehouseCoords = whForGroup is not null
-                                  && whForGroup.Latitude.HasValue
-                                  && whForGroup.Longitude.HasValue;
-
-            if (bypassEligible && hasWarehouseCoords)
+            // Hubs needed below: closest non-transfer-site (for any
+            // DirectDelivery anchor), and the company's transfer-site hub
+            // (already resolved up at line 198). Fall back to the
+            // unfiltered closest pick if no non-transfer-site is configured.
+            Hub? PickNonTransferHub()
             {
-                // Anchor at the nearest NON-transfer-site hub so the van
-                // ends its day at its natural home base (Pekin / Springfield
-                // for outstate Illinois) rather than detouring through
-                // Romeoville. If every hub is the transfer site, fall
-                // through to the unfiltered closest pick.
-                var nonTransferHubs = hubs.Where(h => !h.IsTransferSite).ToList();
-                if (nonTransferHubs.Count > 0)
+                if (whForGroup is null || !whForGroup.Latitude.HasValue || !whForGroup.Longitude.HasValue)
+                    return null;
+                var lat = whForGroup.Latitude.Value;
+                var lng = whForGroup.Longitude.Value;
+                var nonTransfer = hubs.Where(h => !h.IsTransferSite).ToList();
+                var candidates = nonTransfer.Count > 0 ? nonTransfer : hubs;
+                if (candidates.Count == 0) return null;
+                var pickedId = PickClosestHub(candidates, lat, lng);
+                return candidates.First(h => h.Id == pickedId);
+            }
+            Hub? PickAnyClosestHub()
+            {
+                if (whForGroup is null || !whForGroup.Latitude.HasValue || !whForGroup.Longitude.HasValue)
+                    return hubs[0];
+                var pickedId = PickClosestHub(hubs, whForGroup.Latitude.Value, whForGroup.Longitude.Value);
+                return hubs.First(h => h.Id == pickedId);
+            }
+
+            audit.Raw("");
+
+            // ---- Branch A: ChicagoLand warehouse — pre-existing rule set.
+            // Single-zone → DirectDelivery at closest hub; multi-zone →
+            // Pickup + ZonedDelivery via the transfer-site hub. Untouched
+            // by the new partition rules (which the user scoped to
+            // non-ChicagoLand warehouses).
+            //
+            // Branch B: no warehouse — hub-originating orders, hub → stops
+            // → hub. Same single/multi-zone shape as A.
+            //
+            // Branch C: non-ChicagoLand warehouse — NEW partition logic.
+            //   * Non-ChicagoLand subset → DirectDelivery (chunked).
+            //   * ChicagoLand subset → if single-zone AND fits one van,
+            //     DirectDelivery (rule 1 shortcut); else Pickup van to
+            //     HUB_ROM + ZonedDelivery via consolidation pool.
+            if (warehouseIsChicagoLand || whForGroup is null)
+            {
+                // -------- Branches A + B (unchanged behaviour) ----------
+                Hub hubForGroup;
+                if (!isSingleZone && whForGroup is not null && transferSiteHub is not null)
                 {
-                    hubIdForGroup = PickClosestHub(nonTransferHubs, whForGroup!.Latitude!.Value, whForGroup.Longitude!.Value);
+                    // Multi-zone w/ ChicagoLand warehouse → force transfer site.
+                    hubForGroup = transferSiteHub;
                 }
                 else
                 {
-                    hubIdForGroup = PickClosestHub(hubs, whForGroup!.Latitude!.Value, whForGroup.Longitude!.Value);
+                    hubForGroup = PickAnyClosestHub() ?? hubs[0];
                 }
-            }
-            else if (!isSingleZone && whForGroup is not null && transferSiteHub is not null)
-            {
-                // Multi-zone, non-bypass, transfer-site hub configured → force
-                // the transfer site so the warehouse → sort → per-zone-delivery
-                // pipeline can run. Distance to the warehouse is irrelevant
-                // because the sort step is what dictates the hub choice.
-                hubIdForGroup = transferSiteHub.Id;
-            }
-            else if (hasWarehouseCoords)
-            {
-                // Single-zone DirectDelivery, OR multi-zone with no transfer
-                // site configured — fall back to the legacy "closest hub"
-                // pick. DirectDelivery doesn't visit the hub for sorting,
-                // so closest-hub still produces an intuitive route shape.
-                hubIdForGroup = PickClosestHub(hubs, whForGroup!.Latitude!.Value, whForGroup.Longitude!.Value);
-            }
-            else
-            {
-                // No warehouse / no coords — pick the first active hub.
-                // Pre-geocoding should make this rare; defensive fallback.
-                hubIdForGroup = hubs[0].Id;
-            }
 
-            var hubForGroup = hubs.First(h => h.Id == hubIdForGroup);
+                var hubChoiceReason = warehouseIsChicagoLand
+                    ? (isSingleZone
+                        ? "ChicagoLand warehouse, single-zone → closest hub"
+                        : "ChicagoLand warehouse, multi-zone → transfer-site hub")
+                    : "hub-originating orders → closest hub";
+                audit.Line($"Group: {warehouseLabel} → hub \"{hubForGroup.Name}\" ({hubChoiceReason}; sort wait {hubForGroup.SortingWaitMinutes} min)");
 
-            // Audit the decision so the operator can trace WHY a given hub
-            // was picked. The bypass + transfer-site choices are the most
-            // surprising, so call them out explicitly.
-            audit.Raw("");
-            string hubChoiceReason;
-            if (bypassEligible && hubForGroup.IsTransferSite == false)
-                hubChoiceReason = "non-ChicagoLand bypass → closest non-transfer-site hub";
-            else if (hubForGroup.IsTransferSite && !isSingleZone)
-                hubChoiceReason = "multi-zone with sort required → transfer-site hub";
-            else if (isSingleZone)
-                hubChoiceReason = "single-zone DirectDelivery → closest hub";
-            else
-                hubChoiceReason = "default closest-hub assignment";
-            audit.Line($"Group: {warehouseLabel} → hub \"{hubForGroup.Name}\" ({hubChoiceReason}; sort wait {hubForGroup.SortingWaitMinutes} min)");
-            if (bypassEligible)
-            {
-                audit.Line($"  Bypass eligibility: warehouse IsChicagoLand={warehouseIsChicagoLand}, any ChicagoLand-zone order={anyOrderIsChicagoLand} → ELIGIBLE (multi-zone DirectDelivery, skip transfer site).");
-            }
-            else if (!isSingleZone && whForGroup is not null)
-            {
-                audit.Line($"  Bypass eligibility: warehouse IsChicagoLand={warehouseIsChicagoLand}, any ChicagoLand-zone order={anyOrderIsChicagoLand} → INELIGIBLE (routes through transfer site for sort).");
-            }
-
-            // Timing baseline for this delivery date. The window-start is
-            // company-level (see Company.DeliveryWindowStart); all vans
-            // dispatched for this group are anchored to that wall-clock
-            // moment. DirectDelivery vans + Pickup vans leave AT this
-            // time. ZonedDelivery vans wait for the pickup van to return
-            // + the hub's sort wait, computed below from a Haversine
-            // estimate of the hub→warehouse round trip.
-            var deliveryStart = group.Key.OrderDate.Date.Add(deliveryWindowStart);
-
-            // Non-ChicagoLand bypass exception → multi-zone DirectDelivery.
-            // The van picks up at the warehouse, visits every stop (across
-            // any number of non-ChicagoLand zones), then returns to the
-            // home hub. No sort, no transfer-site detour. Chunked by the
-            // standard max-stops cap; each chunk becomes its own van picking
-            // up its slice of the load at the warehouse.
-            if (bypassEligible)
-            {
-                var allOrdersForGroup = new List<Order>();
-                foreach (var (_, list) in ordersByZone) allOrdersForGroup.AddRange(list);
-                allOrdersForGroup.AddRange(unzonedOrders);
-                audit.Line($"  Multi-zone bypass ({ordersByZone.Count} zone(s), {unzonedOrders.Count} unzoned) → DirectDelivery van(s) skip the transfer site.");
-                EmitChunks(
-                    allOrdersForGroup,
-                    RouteType.DirectDelivery,
-                    // ZoneId stays null — the route legitimately spans
-                    // multiple zones. The optimizer's warehouse → stops →
-                    // hub shape handles it the same way single-zone
-                    // DirectDelivery does.
-                    null,
-                    chunkSize,
-                    group.Key.WarehouseId,
-                    hubIdForGroup,
-                    group.Key.OrderDate,
-                    deliveryStart,
-                    storeZoneById,
-                    zoneDetailById,
-                    messages,
-                    audit,
-                    "DirectDelivery van (bypass)");
-                audit.DirectDeliveryCount += Math.Max(1, (allOrdersForGroup.Count + chunkSize - 1) / chunkSize);
-                continue;
-            }
-
-            // Single-zone (or all-unzoned) → DirectDelivery: the van picks
-            // up at the warehouse and goes straight to the stops, skipping
-            // the hub sort entirely. Same 5-stop cap on deliveries; the
-            // warehouse pickup leg is not counted toward the cap (see
-            // UserRouteSettings.DefaultMaxStops).
-            if (isSingleZone)
-            {
-                var zoneId = ordersByZone.Keys.FirstOrDefault();
-                var ordersForZone = ordersByZone.Values.FirstOrDefault() ?? new List<Order>();
-                if (ordersForZone.Count == 0)
+                if (isSingleZone)
                 {
-                    // No zones AND no orders shouldn't happen by construction,
-                    // but be defensive — skip this group.
-                    audit.Line("  · empty group (no zones, no unzoned) — skipped");
+                    var zoneId = ordersByZone.Keys.FirstOrDefault();
+                    var ordersForZone = ordersByZone.Values.FirstOrDefault() ?? unzonedOrders;
+                    if (ordersForZone.Count == 0)
+                    {
+                        audit.Line("  · empty group (no zones, no unzoned) — skipped");
+                        continue;
+                    }
+                    audit.Line($"  Single-zone group → DirectDelivery (van skips the hub).");
+                    EmitChunks(
+                        ordersForZone,
+                        RouteType.DirectDelivery,
+                        zoneId == Guid.Empty ? null : (Guid?)zoneId,
+                        chunkSize,
+                        group.Key.WarehouseId,
+                        hubForGroup.Id,
+                        group.Key.OrderDate,
+                        deliveryStart,
+                        storeZoneById,
+                        zoneDetailById,
+                        messages,
+                        audit,
+                        "DirectDelivery van");
+                    audit.DirectDeliveryCount += Math.Max(1, (ordersForZone.Count + chunkSize - 1) / chunkSize);
                     continue;
                 }
 
-                audit.Line($"  Single-zone group → DirectDelivery (van skips the hub).");
+                // Multi-zone ChicagoLand-warehouse (or hub-originating) →
+                // Pickup + per-zone ZonedDelivery via the chosen hub.
+                EmitPickupAndPoolContributions(
+                    group, ordersByZone, unzonedOrders,
+                    hubForGroup, group.Key.WarehouseId, group.Key.OrderDate, deliveryStart,
+                    warehousesById, storeZoneById, zoneDetailById,
+                    messages, consolidationPools, audit);
+                continue;
+            }
+
+            // -------- Branch C: non-ChicagoLand warehouse partition ------
+            // Layout:
+            //   nonTransferHub anchors every DirectDelivery van emitted here
+            //   transferSiteHub anchors the Pickup van + its pooled
+            //   ZonedDelivery vans (if the ChicagoLand subset needs sorting).
+            var nonTransferHub = PickNonTransferHub() ?? hubs[0];
+            audit.Line($"Group: {warehouseLabel} → non-ChicagoLand warehouse, partition rule (DirectDelivery anchor: {nonTransferHub.Name})");
+            audit.Line($"  Partition: {chicagoOrders.Count} ChicagoLand order(s), {outstateOrders.Count} non-ChicagoLand order(s){(unzonedOrders.Count > 0 ? $" — {unzonedOrders.Count} unzoned bucketed with non-ChicagoLand" : "")}");
+
+            // (a) Non-ChicagoLand subset → DirectDelivery, chunked. Mirrors
+            // rule 2 (and the rule-3 directive that non-ChicagoLand vans
+            // never visit the transfer site).
+            if (outstateOrders.Count > 0)
+            {
+                // Single zone iff every non-ChicagoLand order shares one
+                // zone AND there are no unzoned stragglers. Otherwise
+                // emit with ZoneId = null (the optimizer accepts that
+                // for DirectDelivery as the "multi-zone bypass" shape).
+                var outstateZonesSet = new HashSet<Guid>();
+                foreach (var o in outstateOrders)
+                {
+                    if (o.StoreId.HasValue
+                        && storeZoneById.TryGetValue(o.StoreId.Value, out var zid)
+                        && zid.HasValue)
+                        outstateZonesSet.Add(zid.Value);
+                }
+                Guid? outstateZoneId = (outstateZonesSet.Count == 1 && unzonedOrders.Count == 0)
+                    ? (Guid?)outstateZonesSet.First()
+                    : null;
+                var outstateChunks = (outstateOrders.Count + chunkSize - 1) / chunkSize;
+                audit.Line($"  Non-ChicagoLand subset → {outstateChunks} DirectDelivery van(s) from warehouse to {nonTransferHub.Name}.");
                 EmitChunks(
-                    ordersForZone,
+                    outstateOrders,
                     RouteType.DirectDelivery,
-                    zoneId == Guid.Empty ? null : (Guid?)zoneId,
+                    outstateZoneId,
                     chunkSize,
                     group.Key.WarehouseId,
-                    hubIdForGroup,
+                    nonTransferHub.Id,
                     group.Key.OrderDate,
                     deliveryStart,
                     storeZoneById,
                     zoneDetailById,
                     messages,
                     audit,
-                    "DirectDelivery van");
-                audit.DirectDeliveryCount += Math.Max(1, (ordersForZone.Count + chunkSize - 1) / chunkSize);
-                continue;
+                    "DirectDelivery van (non-ChicagoLand)");
+                audit.DirectDeliveryCount += outstateChunks;
             }
 
-            // Multi-zone → 1 Pickup (warehouse → hub) + N ZonedDelivery
-            // routes, one per zone (each chunked by the cap). The pickup
-            // van's job is sorting-bound, so each zone's delivery van
-            // dispatches after the hub's SortingWaitMinutes has elapsed.
-            audit.Line($"  Multi-zone group ({ordersByZone.Count} zone(s), {unzonedOrders.Count} unzoned) → 1 Pickup van + per-zone delivery vans.");
-
-            // Estimate the pickup van's round-trip duration via Haversine
-            // so the scheduler can stamp ZonedDelivery ScheduledDepartTime
-            // *before* Google Directions runs. Urban average 50 km/h is a
-            // reasonable proxy; Google's actual leg duration will refine
-            // HubArrivalTime on the Pickup route, but for v1 the delivery
-            // van depart-time uses this estimate so dispatch decisions are
-            // deterministic and don't depend on optimizer ordering.
-            int travelSeconds = 30 * 60; // 30-min default when coords missing
-            // Warehouse loading wait — minutes the van spends at the
-            // warehouse for paperwork / loading dock — pulled from the
-            // warehouse row (default 15). Folded into the pickup return
-            // estimate so paired ZonedDelivery depart times reflect the
-            // real elapsed time.
-            var warehouseWaitMinutes = group.Key.WarehouseId.HasValue
-                && warehousesById.TryGetValue(group.Key.WarehouseId.Value, out var whForWait)
-                    ? whForWait.LoadingWaitMinutes
-                    : 0;
-
-            if (group.Key.WarehouseId.HasValue
-                && warehousesById.TryGetValue(group.Key.WarehouseId.Value, out var whForEstimate)
-                && whForEstimate.Latitude.HasValue && whForEstimate.Longitude.HasValue
-                && hubForGroup.Latitude.HasValue && hubForGroup.Longitude.HasValue)
+            // (b) ChicagoLand subset
+            if (chicagoOrders.Count > 0)
             {
-                var meters = GeoMath.HaversineMeters(
-                    hubForGroup.Latitude.Value, hubForGroup.Longitude.Value,
-                    whForEstimate.Latitude.Value, whForEstimate.Longitude.Value);
-                const double urbanMetersPerSecond = 50.0 * 1000.0 / 3600.0; // 50 km/h
-                // ×2 because pickup is hub → warehouse → hub round trip.
-                travelSeconds = (int)Math.Round(meters * 2 / urbanMetersPerSecond);
-            }
-
-            var roundTripSeconds     = travelSeconds + (warehouseWaitMinutes * 60);
-            var pickupReturnEstimate = deliveryStart.AddSeconds(roundTripSeconds);
-            var zonedDepartEstimate  = pickupReturnEstimate.AddMinutes(hubForGroup.SortingWaitMinutes);
-            audit.Line($"  Pickup round-trip est: {(travelSeconds / 60.0):F1} min travel + {warehouseWaitMinutes} min loading = {(roundTripSeconds / 60.0):F1} min — pickup van back at hub ≈ {pickupReturnEstimate:HH:mm}");
-            audit.Line($"  Sort wait: {hubForGroup.SortingWaitMinutes} min — ZonedDelivery vans dispatch ≈ {zonedDepartEstimate:HH:mm}");
-
-            // Pickup: hub → warehouse → hub round-trip. The driver starts
-            // the day at the hub (their home base), drives to the warehouse
-            // for pickup, then returns to the hub for the sort. Carries the
-            // whole group's order ids as the truck's cargo manifest — no
-            // delivery stops materialise from this message.
-            var pickupAllOrderIds = group.Select(o => o.Id).ToList();
-            var pickupRouteId     = Guid.NewGuid();
-            messages.Add(new RouteOptimizationRequestMessage(
-                pickupRouteId,
-                companyId,
-                null,
-                hubIdForGroup,
-                group.Key.WarehouseId,
-                group.Key.OrderDate,
-                pickupAllOrderIds,
-                DateTime.UtcNow,
-                RouteType.Pickup,
-                null,
-                deliveryStart));
-            audit.Line($"  · Pickup van: hub → warehouse → hub ({pickupAllOrderIds.Count} order(s) on the truck) — leaves hub at {deliveryStart:HH:mm}");
-            // Cargo manifest — every order on this Pickup van. Lets the
-            // administrator confirm the truck is carrying exactly the
-            // orders it should before reading the per-zone delivery vans
-            // below. Sorted by zone first so the manifest groups
-            // intuitively when the operator skims it.
-            var cargoOrders = group
-                .OrderBy(o => o.StoreId.HasValue && storeZoneById.TryGetValue(o.StoreId.Value, out var zz) && zz.HasValue
-                              ? (zoneDetailById.TryGetValue(zz.Value, out var zd) ? zd.Code : "")
-                              : "~")
-                .ThenBy(o => o.StoreName)
-                .ToList();
-            for (int idx = 0; idx < cargoOrders.Count; idx++)
-                WriteStopDetail(audit, cargoOrders[idx], $"[cargo {idx + 1}]", storeZoneById, zoneDetailById);
-
-            // Don't emit per-zone ZonedDelivery messages here. Instead
-            // contribute every (hub, zone, date) cell into the
-            // consolidation pool so cross-warehouse contributors converge
-            // into ONE delivery van per zone. The actual ZonedDelivery
-            // EmitChunks happens after the warehouse-group loop closes,
-            // once we know every pickup feeding each pool.
-            foreach (var (zoneId, ordersForZone) in ordersByZone)
-            {
-                var key = (HubId: hubIdForGroup, ZoneId: (Guid?)zoneId, OrderDate: group.Key.OrderDate);
-                if (!consolidationPools.TryGetValue(key, out var pool))
+                var chicagoSingleZone = chicagoZones.Count == 1;
+                var chicagoFitsOneVan = chicagoOrders.Count <= chunkSize;
+                if (chicagoSingleZone && chicagoFitsOneVan)
                 {
-                    pool = new ConsolidationPool(hubForGroup);
-                    consolidationPools[key] = pool;
+                    // Rule 1 shortcut. The whole ChicagoLand subset fits a
+                    // single DirectDelivery van and shares one zone — drive
+                    // straight from the warehouse without the HUB_ROM
+                    // detour. Anchors at the same non-transfer-site hub
+                    // the non-ChicagoLand vans use; the SDK accepts a
+                    // multi-zone ZoneId-null route too if you'd prefer
+                    // not to tag it, but tagging it matches single-zone
+                    // semantics elsewhere.
+                    audit.Line($"  ChicagoLand subset ({chicagoOrders.Count} order(s) in one zone) → rule-1 shortcut: DirectDelivery from warehouse.");
+                    EmitChunks(
+                        chicagoOrders,
+                        RouteType.DirectDelivery,
+                        chicagoZones.First(),
+                        chunkSize,
+                        group.Key.WarehouseId,
+                        nonTransferHub.Id,
+                        group.Key.OrderDate,
+                        deliveryStart,
+                        storeZoneById,
+                        zoneDetailById,
+                        messages,
+                        audit,
+                        "DirectDelivery van (ChicagoLand shortcut)");
+                    audit.DirectDeliveryCount++;
                 }
-                pool.Orders.AddRange(ordersForZone);
-                pool.Contributors.Add((pickupRouteId, pickupReturnEstimate));
-            }
-            if (unzonedOrders.Count > 0)
-            {
-                // Stragglers without a zone get their own pool keyed on
-                // ZoneId = null at this hub. Still consolidates across
-                // warehouses (a 'wait for everyone' bucket), but the
-                // audit flags it so the operator can fix the source data
-                // by populating store.ZoneId.
-                audit.Line($"  · {unzonedOrders.Count} unzoned order(s) added to the hub's unzoned bucket — fix store.ZoneId to clean this up.");
-                var key = (HubId: hubIdForGroup, ZoneId: (Guid?)null, OrderDate: group.Key.OrderDate);
-                if (!consolidationPools.TryGetValue(key, out var pool))
+                else if (transferSiteHub is not null)
                 {
-                    pool = new ConsolidationPool(hubForGroup);
-                    consolidationPools[key] = pool;
+                    // Multi-zone OR oversized ChicagoLand subset → MUST
+                    // go through HUB_ROM. The Pickup van carries the
+                    // ChicagoLand subset as cargo (no stops, no max-stop
+                    // limit). After the sort wait, per-zone ZonedDelivery
+                    // vans dispatch from HUB_ROM.
+                    audit.Line($"  ChicagoLand subset ({chicagoOrders.Count} order(s), {chicagoZones.Count} zone(s)) → Pickup van → {transferSiteHub.Name}, then per-zone ZonedDelivery.");
+                    var chicagoByZone = chicagoOrders
+                        .Where(o => o.StoreId.HasValue
+                                 && storeZoneById.TryGetValue(o.StoreId.Value, out var zid)
+                                 && zid.HasValue)
+                        .GroupBy(o => storeZoneById[o.StoreId!.Value]!.Value)
+                        .ToDictionary(g => g.Key, g => g.ToList());
+                    EmitPickupAndPoolContributions(
+                        chicagoOrders, chicagoByZone, new List<Order>(),
+                        transferSiteHub, group.Key.WarehouseId, group.Key.OrderDate, deliveryStart,
+                        warehousesById, storeZoneById, zoneDetailById,
+                        messages, consolidationPools, audit);
                 }
-                pool.Orders.AddRange(unzonedOrders);
-                pool.Contributors.Add((pickupRouteId, pickupReturnEstimate));
+                else
+                {
+                    // No transfer site configured — fall back to
+                    // DirectDelivery for the ChicagoLand subset too. This
+                    // is a degraded state (no sort possible) but better
+                    // than refusing to dispatch.
+                    audit.Line("  ! No transfer-site hub configured — ChicagoLand subset falling back to DirectDelivery (multi-zone allowed).");
+                    var fallbackChunks = (chicagoOrders.Count + chunkSize - 1) / chunkSize;
+                    EmitChunks(
+                        chicagoOrders,
+                        RouteType.DirectDelivery,
+                        chicagoSingleZone ? chicagoZones.First() : (Guid?)null,
+                        chunkSize,
+                        group.Key.WarehouseId,
+                        nonTransferHub.Id,
+                        group.Key.OrderDate,
+                        deliveryStart,
+                        storeZoneById,
+                        zoneDetailById,
+                        messages,
+                        audit,
+                        "DirectDelivery van (ChicagoLand fallback)");
+                    audit.DirectDeliveryCount += fallbackChunks;
+                }
             }
         }
 
@@ -837,16 +799,60 @@ public class RouteScheduler : IRouteScheduler
 
             if (refreshedZoned.Count > 0)
             {
+                // Refresh both the route header AND every per-stop ETA on
+                // the same route. Without the stop-level shift the route
+                // says "Depart 13:01" but each RouteStop.EstimatedArrival
+                // still carries the original Haversine-estimate base
+                // (e.g. 08:29, 08:59…), which made the times read as if
+                // the van started delivering hours before the pickup van
+                // had even returned. Shift by the delta so the relative
+                // leg timing Google computed stays intact while the
+                // whole sequence anchors at the corrected depart moment.
                 var ids = refreshedZoned.Keys.ToList();
                 var rows = await _db.Routes.IgnoreQueryFilters()
+                    .Include(r => r.Stops)
                     .Where(r => ids.Contains(r.Id))
                     .ToListAsync(ct);
                 var nowUtc = DateTime.UtcNow;
+
+                // Collect order IDs so we can also update their
+                // ExpectedDeliveryDate + ConfirmationDeadline, which mirror
+                // the stops' EstimatedArrival on the agent path.
+                var ordersToShift = new Dictionary<Guid, TimeSpan>();
                 foreach (var r in rows)
                 {
-                    r.ScheduledDepartTime = refreshedZoned[r.Id];
+                    var newDepart = refreshedZoned[r.Id];
+                    var oldDepart = r.ScheduledDepartTime;
+                    r.ScheduledDepartTime = newDepart;
                     r.UpdatedAt = nowUtc;
+                    if (oldDepart is null) continue;
+                    var delta = newDepart - oldDepart.Value;
+                    if (delta == TimeSpan.Zero) continue;
+                    foreach (var stop in r.Stops)
+                    {
+                        if (stop.EstimatedArrival.HasValue)
+                            stop.EstimatedArrival = stop.EstimatedArrival.Value.Add(delta);
+                        ordersToShift[stop.OrderId] = delta;
+                    }
                 }
+
+                if (ordersToShift.Count > 0)
+                {
+                    var orderIds = ordersToShift.Keys.ToList();
+                    var ordersToUpdate = await _db.Orders.IgnoreQueryFilters()
+                        .Where(o => orderIds.Contains(o.Id))
+                        .ToListAsync(ct);
+                    foreach (var o in ordersToUpdate)
+                    {
+                        var d = ordersToShift[o.Id];
+                        if (o.ExpectedDeliveryDate.HasValue)
+                            o.ExpectedDeliveryDate = o.ExpectedDeliveryDate.Value.Add(d);
+                        if (o.ConfirmationDeadline.HasValue)
+                            o.ConfirmationDeadline = o.ConfirmationDeadline.Value.Add(d);
+                        o.UpdatedAt = nowUtc;
+                    }
+                }
+
                 await _db.SaveChangesAsync(ct);
             }
         }
@@ -1134,6 +1140,112 @@ public class RouteScheduler : IRouteScheduler
             audit.Line($"        Customer: {order.Customer}");
         if (!string.IsNullOrWhiteSpace(order.SalesOrderNumber))
             audit.Line($"        SO #:     {order.SalesOrderNumber}");
+    }
+
+    /// <summary>
+    /// Emits one Pickup van message (warehouse → hub round-trip, cargo
+    /// only) for a subset of orders, then contributes each
+    /// (hub × zone × orderDate) cell to the shared consolidation pool.
+    /// The actual ZonedDelivery messages are emitted after the
+    /// warehouse-group loop closes, once every contributor pickup has
+    /// been registered, so cross-warehouse cargo converges into one van
+    /// per zone.
+    ///
+    /// Lifted out of the foreach body so both the ChicagoLand-warehouse
+    /// branch (whole group) and the non-ChicagoLand-warehouse partition
+    /// (ChicagoLand subset only) can drive the same Pickup → sort →
+    /// ZonedDelivery pipeline.
+    /// </summary>
+    private static void EmitPickupAndPoolContributions(
+        IEnumerable<Order>                                    cargoOrders,
+        IReadOnlyDictionary<Guid, List<Order>>                ordersByZoneForPickup,
+        IReadOnlyList<Order>                                  unzonedForPickup,
+        Hub                                                   hub,
+        Guid?                                                 warehouseId,
+        DateTime                                              orderDate,
+        DateTime                                              deliveryStart,
+        IReadOnlyDictionary<Guid, Warehouse>                  warehousesById,
+        IReadOnlyDictionary<Guid, Guid?>                      storeZoneById,
+        IReadOnlyDictionary<Guid, ZoneDetail>                 zoneDetailById,
+        List<RouteOptimizationRequestMessage>                 messages,
+        Dictionary<(Guid HubId, Guid? ZoneId, DateTime OrderDate), ConsolidationPool> consolidationPools,
+        OptimizationAuditBuilder                              audit)
+    {
+        // Haversine + warehouse-load estimate, same logic the old inline
+        // path used. Travel default 30 min when coords are missing so the
+        // pickup return + sort wait still gets stamped onto downstream
+        // ZonedDelivery vans (just imprecisely).
+        int travelSeconds = 30 * 60;
+        var warehouseWaitMinutes = warehouseId.HasValue
+            && warehousesById.TryGetValue(warehouseId.Value, out var whForWait)
+                ? whForWait.LoadingWaitMinutes
+                : 0;
+        if (warehouseId.HasValue
+            && warehousesById.TryGetValue(warehouseId.Value, out var whForEstimate)
+            && whForEstimate.Latitude.HasValue && whForEstimate.Longitude.HasValue
+            && hub.Latitude.HasValue && hub.Longitude.HasValue)
+        {
+            var meters = GeoMath.HaversineMeters(
+                hub.Latitude.Value, hub.Longitude.Value,
+                whForEstimate.Latitude.Value, whForEstimate.Longitude.Value);
+            const double urbanMetersPerSecond = 50.0 * 1000.0 / 3600.0; // 50 km/h
+            travelSeconds = (int)Math.Round(meters * 2 / urbanMetersPerSecond);
+        }
+        var roundTripSeconds     = travelSeconds + (warehouseWaitMinutes * 60);
+        var pickupReturnEstimate = deliveryStart.AddSeconds(roundTripSeconds);
+        var zonedDepartEstimate  = pickupReturnEstimate.AddMinutes(hub.SortingWaitMinutes);
+        audit.Line($"  Pickup round-trip est: {(travelSeconds / 60.0):F1} min travel + {warehouseWaitMinutes} min loading = {(roundTripSeconds / 60.0):F1} min — pickup van back at hub ≈ {pickupReturnEstimate:HH:mm}");
+        audit.Line($"  Sort wait: {hub.SortingWaitMinutes} min — ZonedDelivery vans dispatch ≈ {zonedDepartEstimate:HH:mm}");
+
+        var cargoList = cargoOrders as IReadOnlyList<Order> ?? cargoOrders.ToList();
+        var pickupAllOrderIds = cargoList.Select(o => o.Id).ToList();
+        var pickupRouteId     = Guid.NewGuid();
+        messages.Add(new RouteOptimizationRequestMessage(
+            pickupRouteId,
+            cargoList[0].CompanyId,
+            null,
+            hub.Id,
+            warehouseId,
+            orderDate,
+            pickupAllOrderIds,
+            DateTime.UtcNow,
+            RouteType.Pickup,
+            null,
+            deliveryStart));
+        audit.Line($"  · Pickup van: hub → warehouse → hub ({pickupAllOrderIds.Count} order(s) on the truck) — leaves hub at {deliveryStart:HH:mm}");
+
+        var manifest = cargoList
+            .OrderBy(o => o.StoreId.HasValue && storeZoneById.TryGetValue(o.StoreId.Value, out var zz) && zz.HasValue
+                          ? (zoneDetailById.TryGetValue(zz.Value, out var zd) ? zd.Code : "")
+                          : "~")
+            .ThenBy(o => o.StoreName)
+            .ToList();
+        for (int idx = 0; idx < manifest.Count; idx++)
+            WriteStopDetail(audit, manifest[idx], $"[cargo {idx + 1}]", storeZoneById, zoneDetailById);
+
+        foreach (var (zoneId, ordersForZone) in ordersByZoneForPickup)
+        {
+            var key = (HubId: hub.Id, ZoneId: (Guid?)zoneId, OrderDate: orderDate);
+            if (!consolidationPools.TryGetValue(key, out var pool))
+            {
+                pool = new ConsolidationPool(hub);
+                consolidationPools[key] = pool;
+            }
+            pool.Orders.AddRange(ordersForZone);
+            pool.Contributors.Add((pickupRouteId, pickupReturnEstimate));
+        }
+        if (unzonedForPickup.Count > 0)
+        {
+            audit.Line($"  · {unzonedForPickup.Count} unzoned order(s) added to the hub's unzoned bucket — fix store.ZoneId to clean this up.");
+            var key = (HubId: hub.Id, ZoneId: (Guid?)null, OrderDate: orderDate);
+            if (!consolidationPools.TryGetValue(key, out var pool))
+            {
+                pool = new ConsolidationPool(hub);
+                consolidationPools[key] = pool;
+            }
+            pool.Orders.AddRange(unzonedForPickup);
+            pool.Contributors.Add((pickupRouteId, pickupReturnEstimate));
+        }
     }
 
     /// <summary>
