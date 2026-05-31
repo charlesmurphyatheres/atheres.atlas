@@ -1,8 +1,10 @@
 using System.Net;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Atheres.Atlas.Data;
 using Atheres.Atlas.Data.Services;
 using Atheres.Atlas.Domain.Entities;
+using Atheres.Atlas.Domain.Enums;
 using Atheres.Atlas.Functions.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -31,6 +33,9 @@ public class StoresAgent
     {
         PropertyNamingPolicy        = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = true,
+        // Accept "Booking" / "calendly" / "None" / "Email" in the update DTO
+        // rather than requiring the int value the enum is stored as.
+        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
     public StoresAgent(
@@ -216,6 +221,18 @@ public class StoresAgent
         if (!string.IsNullOrWhiteSpace(newLicense))        store.LicenseNumber = newLicense;
         if (dto.IsActive    is not null)                   store.IsActive      = dto.IsActive.Value;
 
+        // Scheduling settings (per-store). Method is set unconditionally
+        // when supplied so the operator can flip back to None and clear
+        // out credentials in one save. Credential fields are PATCH-style:
+        // null = leave alone, "" = explicit clear.
+        if (dto.SchedulingMethod is not null) store.SchedulingMethod = dto.SchedulingMethod.Value;
+        if (dto.BookingClientId          is not null) store.BookingClientId          = NullIfBlank(dto.BookingClientId);
+        if (dto.BookingClientSecret      is not null) store.BookingClientSecret      = NullIfBlank(dto.BookingClientSecret);
+        if (dto.BookingCalendarName      is not null) store.BookingCalendarName      = NullIfBlank(dto.BookingCalendarName);
+        if (dto.CalendlyAccessToken      is not null) store.CalendlyAccessToken      = NullIfBlank(dto.CalendlyAccessToken);
+        if (dto.CalendlyCalendarName     is not null) store.CalendlyCalendarName     = NullIfBlank(dto.CalendlyCalendarName);
+        if (dto.SchedulingEmailRecipients is not null) store.SchedulingEmailRecipients = NullIfBlank(dto.SchedulingEmailRecipients);
+
         if (addressChanged)
         {
             store.Latitude         = null;
@@ -237,6 +254,11 @@ public class StoresAgent
             regeocodeQueued = addressChanged,
         });
     }
+
+    // PATCH semantics for scheduling credential strings: an empty / whitespace
+    // payload means "explicitly clear this field" (operator wiping a secret
+    // before changing method). A null payload means "leave alone".
+    private static string? NullIfBlank(string? v) => string.IsNullOrWhiteSpace(v) ? null : v.Trim();
 }
 
 public class CreateStoreDto
@@ -272,4 +294,12 @@ public class UpdateStoreDto
     public string? Email { get; set; }
     public string? Phone { get; set; }
     public bool?   IsActive { get; set; }
+
+    public SchedulingMethod? SchedulingMethod { get; set; }
+    public string? BookingClientId          { get; set; }
+    public string? BookingClientSecret      { get; set; }
+    public string? BookingCalendarName      { get; set; }
+    public string? CalendlyAccessToken      { get; set; }
+    public string? CalendlyCalendarName     { get; set; }
+    public string? SchedulingEmailRecipients { get; set; }
 }

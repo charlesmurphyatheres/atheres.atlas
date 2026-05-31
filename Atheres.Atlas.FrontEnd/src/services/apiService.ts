@@ -320,6 +320,8 @@ export async function deleteTruck(id: string): Promise<void> {
 
 // ---- Stores ----
 
+export type SchedulingMethod = 'None' | 'Booking' | 'Calendly' | 'Email'
+
 export interface StoreLite {
   id: string
   /** Companies this store is shared with (many-to-many). Always non-empty for
@@ -341,6 +343,16 @@ export interface StoreLite {
   isActive?: boolean
   zone?: string | null
   district?: string | null
+  // Per-store scheduling integration (Microsoft Bookings, Calendly, Email,
+  // or None). Credentials are returned alongside so the admin sub-interface
+  // can pre-fill its form; same trust boundary as the existing fields.
+  schedulingMethod?: SchedulingMethod
+  bookingClientId?: string | null
+  bookingClientSecret?: string | null
+  bookingCalendarName?: string | null
+  calendlyAccessToken?: string | null
+  calendlyCalendarName?: string | null
+  schedulingEmailRecipients?: string | null
 }
 
 export async function getStores(): Promise<StoreLite[]> {
@@ -381,10 +393,56 @@ export interface UpdateStorePayload {
   email?: string
   phone?: string
   isActive?: boolean
+  // Scheduling: null/undefined = leave alone; empty string = explicit clear.
+  schedulingMethod?: SchedulingMethod
+  bookingClientId?: string | null
+  bookingClientSecret?: string | null
+  bookingCalendarName?: string | null
+  calendlyAccessToken?: string | null
+  calendlyCalendarName?: string | null
+  schedulingEmailRecipients?: string | null
 }
 
 export async function updateStore(id: string, payload: UpdateStorePayload): Promise<void> {
   await api.put(`/stores/${id}`, payload)
+}
+
+// ---- Scheduling availability preview ----
+// Hits POST /api/stores/{id}/scheduling/availability with whatever
+// credentials are currently in the sub-interface form, so the operator
+// can test before saving.
+
+export interface AvailabilityPreviewPayload {
+  method: SchedulingMethod
+  bookingClientId?: string | null
+  bookingClientSecret?: string | null
+  bookingCalendarName?: string | null
+  calendlyAccessToken?: string | null
+  calendlyCalendarName?: string | null
+  emailRecipients?: string | null
+}
+
+export interface AvailabilitySlot {
+  start: string
+  end: string
+  label?: string | null
+  providerRef?: string | null
+}
+
+export interface AvailabilityPreviewResult {
+  method: SchedulingMethod
+  slots: AvailabilitySlot[]
+}
+
+export async function getStoreSchedulingAvailability(
+  storeId: string,
+  payload: AvailabilityPreviewPayload,
+): Promise<AvailabilityPreviewResult> {
+  const { data } = await api.post<AvailabilityPreviewResult>(
+    `/stores/${storeId}/scheduling/availability`,
+    payload,
+  )
+  return data
 }
 
 // ---- Hubs ----

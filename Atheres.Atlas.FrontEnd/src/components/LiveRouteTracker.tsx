@@ -12,6 +12,12 @@ const ROUTE_COLORS = [
   '#0891b2', '#db2777', '#65a30d', '#c026d3', '#ca8a04',
 ]
 
+// Hoisted to module scope so the reference is stable across renders.
+// @react-google-maps/api treats `center` as a controlled prop and calls
+// map.setCenter() whenever the reference changes — passing an inline
+// object literal would snap the map back here on every re-render.
+const INITIAL_MAP_CENTER = { lat: 40.0, lng: -89.0 }
+
 function decodePolyline(encoded: string): { lat: number; lng: number }[] {
   const points: { lat: number; lng: number }[] = []
   let index = 0, lat = 0, lng = 0
@@ -453,7 +459,7 @@ export default function LiveRouteTracker() {
             <GoogleMap
               key={selectedDate}
               mapContainerStyle={{ width: '100%', height: '100%' }}
-              center={{ lat: 40.0, lng: -89.0 }}
+              center={INITIAL_MAP_CENTER}
               zoom={7}
               onLoad={onMapLoad}
               onUnmount={() => { mapRef.current = null }}

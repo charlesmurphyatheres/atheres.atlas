@@ -1,3 +1,5 @@
+using Atheres.Atlas.Domain.Enums;
+
 namespace Atheres.Atlas.Domain.Entities;
 
 /// <summary>
@@ -32,6 +34,27 @@ public class Store
     public bool IsActive    { get; set; } = true;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
+    // ---- Scheduling integration (per-store) -----------------------------
+    // Drives Atheres.Atlas.Scheduling's provider factory. Credentials here
+    // are per-store because each dispensary owns its own Microsoft Bookings
+    // / Calendly account. Stored as plain columns for now; encryption /
+    // Key Vault references can be layered on later without changing
+    // SchedulingMethod or the provider contract.
+
+    public SchedulingMethod SchedulingMethod { get; set; } = SchedulingMethod.None;
+
+    public string? BookingClientId       { get; set; }
+    public string? BookingClientSecret   { get; set; }
+    public string? BookingCalendarName   { get; set; }
+
+    public string? CalendlyAccessToken   { get; set; }
+    public string? CalendlyCalendarName  { get; set; }
+
+    /// <summary>Comma-separated recipient list for the Email scheduling
+    /// method. Each address receives the Confirm/Cancel email when a route
+    /// touching this store is built.</summary>
+    public string? SchedulingEmailRecipients { get; set; }
 
     // Navigation
     /// <summary>Companies that can dispatch to this store. A store may serve
