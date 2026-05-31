@@ -24,6 +24,17 @@ public class StoreConfiguration : IEntityTypeConfiguration<Store>
         builder.Property(s => s.Phone).HasMaxLength(30);
         builder.Property(s => s.FormattedAddress).HasMaxLength(500);
 
+        // Scheduling integration columns. Method is required (defaults to
+        // None). Credentials are nullable — only the columns relevant to
+        // the chosen Method are populated.
+        builder.Property(s => s.SchedulingMethod).HasConversion<int>().IsRequired();
+        builder.Property(s => s.BookingClientId).HasMaxLength(200);
+        builder.Property(s => s.BookingClientSecret).HasMaxLength(500);
+        builder.Property(s => s.BookingCalendarName).HasMaxLength(200);
+        builder.Property(s => s.CalendlyAccessToken).HasMaxLength(500);
+        builder.Property(s => s.CalendlyCalendarName).HasMaxLength(200);
+        builder.Property(s => s.SchedulingEmailRecipients).HasMaxLength(2000);
+
         builder.HasIndex(s => s.LicenseNumber);
         builder.HasIndex(s => s.Customer);
         builder.HasIndex(s => s.ZoneId);

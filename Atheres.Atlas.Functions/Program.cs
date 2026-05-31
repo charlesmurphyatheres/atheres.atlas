@@ -4,6 +4,8 @@ using Atheres.Atlas.Data.Repositories;
 using Atheres.Atlas.Data.Services;
 using Atheres.Atlas.Functions.Middleware;
 using Atheres.Atlas.Functions.Services;
+using Atheres.Atlas.Scheduling.DependencyInjection;
+using Atheres.Atlas.Scheduling.Providers;
 using Azure.Messaging.ServiceBus;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Azure.Functions.Worker;
@@ -97,6 +99,14 @@ var host = new HostBuilder()
 
         // ---- Communication -------------------------------------------------
         services.AddSingleton<IEmailService, SendGridEmailService>();
+
+        // ---- Scheduling integrations (Microsoft Bookings, Calendly, Email, None) ----
+        // The Scheduling project owns the per-store provider contract +
+        // factory. The Email provider needs to send mail, but the project
+        // is SendGrid-agnostic — bridge it onto the existing IEmailService
+        // via the adapter below.
+        services.AddAtlasScheduling(config);
+        services.AddScoped<ISchedulingEmailSender, SchedulingEmailSenderAdapter>();
     })
     .ConfigureLogging(logging =>
     {

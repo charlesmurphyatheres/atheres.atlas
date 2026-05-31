@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { getUsers, registerUser, deactivateUser, getOrders, updateOrderStatus, bulkUpdateOrderStatus, getRoutes, getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse, getHubs, createHub, updateHub, deleteHub, getTrucks, createTruck, updateTruck, deleteTruck, getStores, updateStore, getDistricts, updateDistrict, getCompanies, deleteOrder, deleteRoute, getOptimizationAudits, getOptimizationAudit, printRouteItinerary, printOptimizationAudit, type StoreLite, type UpdateStorePayload, type OptimizationAuditSummary, type OptimizationAuditDetail } from '../../services/apiService'
+import { getUsers, registerUser, deactivateUser, getOrders, updateOrderStatus, bulkUpdateOrderStatus, getRoutes, getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse, getHubs, createHub, updateHub, deleteHub, getTrucks, createTruck, updateTruck, deleteTruck, getStores, updateStore, getDistricts, updateDistrict, getCompanies, deleteOrder, deleteRoute, getOptimizationAudits, getOptimizationAudit, printRouteItinerary, printOptimizationAudit, getStoreSchedulingAvailability, type StoreLite, type UpdateStorePayload, type OptimizationAuditSummary, type OptimizationAuditDetail, type SchedulingMethod, type AvailabilitySlot } from '../../services/apiService'
 import BulkStatusBar from '../ui/BulkStatusBar'
 import { summarizeBulkStatusResult } from '../ui/bulkStatusSummary'
 import { TRUCK_STATUSES, type TruckStatus } from '../../types'
@@ -10,7 +10,7 @@ import { format } from 'date-fns'
 import { useAuth } from '../../contexts/AuthContext'
 import { useCompanyContext } from '../../contexts/CompanyContext'
 
-type Tab = 'users' | 'orders' | 'routes' | 'warehouses' | 'hubs' | 'vans' | 'stores' | 'districts' | 'audits'
+type Tab = 'users' | 'orders' | 'routes' | 'warehouses' | 'hubs' | 'vans' | 'stores' | 'communications' | 'districts' | 'audits'
 
 /** Props every tab accepts so it can render a Company column when a
  *  SuperAdmin is viewing "All Companies". `companyName(id)` returns the
@@ -57,7 +57,7 @@ export default function AdminPanel() {
       </div>
 
       <div className="flex gap-1 border-b border-gray-200">
-        {(['orders', 'routes', 'hubs', 'vans', 'warehouses', 'stores', 'districts', 'users', 'audits'] as Tab[]).map((t) => (
+        {(['orders', 'routes', 'hubs', 'vans', 'warehouses', 'stores', 'communications', 'districts', 'users', 'audits'] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -78,6 +78,7 @@ export default function AdminPanel() {
       {tab === 'vans' && <VansTab {...display} />}
       {tab === 'warehouses' && <WarehousesTab {...display} />}
       {tab === 'stores' && <StoresTab {...display} />}
+      {tab === 'communications' && <CommunicationsTab {...display} />}
       {tab === 'districts' && <DistrictsTab {...display} />}
       {tab === 'users' && <UsersTab {...display} />}
       {tab === 'audits' && <OptimizationAuditsTab />}
@@ -1315,6 +1316,7 @@ function StoresTab({ showCompany }: CompanyDisplay) {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [editing, setEditing] = useState<StoreLite | null>(null)
+  const [schedulingFor, setSchedulingFor] = useState<StoreLite | null>(null)
   const { sorted: sortedStores, sortKey, sortDir, toggle } = useSortedRows(stores, {
     accessors: {
       zone:     (s) => s.zone     ?? '',
@@ -1360,6 +1362,13 @@ function StoresTab({ showCompany }: CompanyDisplay) {
       ...(patch.email         !== undefined ? { email:         patch.email }         : {}),
       ...(patch.phone         !== undefined ? { phone:         patch.phone }         : {}),
       ...(patch.isActive      !== undefined ? { isActive:      patch.isActive }      : {}),
+      ...(patch.schedulingMethod          !== undefined ? { schedulingMethod:          patch.schedulingMethod }          : {}),
+      ...(patch.bookingClientId           !== undefined ? { bookingClientId:           patch.bookingClientId }           : {}),
+      ...(patch.bookingClientSecret       !== undefined ? { bookingClientSecret:       patch.bookingClientSecret }       : {}),
+      ...(patch.bookingCalendarName       !== undefined ? { bookingCalendarName:       patch.bookingCalendarName }       : {}),
+      ...(patch.calendlyAccessToken       !== undefined ? { calendlyAccessToken:       patch.calendlyAccessToken }       : {}),
+      ...(patch.calendlyCalendarName      !== undefined ? { calendlyCalendarName:      patch.calendlyCalendarName }      : {}),
+      ...(patch.schedulingEmailRecipients !== undefined ? { schedulingEmailRecipients: patch.schedulingEmailRecipients } : {}),
     }))
   }
 
@@ -1394,6 +1403,7 @@ function StoresTab({ showCompany }: CompanyDisplay) {
                 <SortHeader label="City"      sortKey="city"          activeKey={sortKey} dir={sortDir} onClick={() => toggle('city')} />
                 <SortHeader label="Zone"      sortKey="zone"          activeKey={sortKey} dir={sortDir} onClick={() => toggle('zone')} />
                 <SortHeader label="District"  sortKey="district"      activeKey={sortKey} dir={sortDir} onClick={() => toggle('district')} />
+                {canEdit && <th className="px-4 py-3 text-left font-medium">Scheduling</th>}
                 {canEdit && <th className="px-4 py-3 text-left font-medium"></th>}
               </tr>
             </thead>
@@ -1423,6 +1433,17 @@ function StoresTab({ showCompany }: CompanyDisplay) {
                   {canEdit && (
                     <td className="px-4 py-3">
                       <button
+                        onClick={() => setSchedulingFor(s)}
+                        className="text-xs text-brand-600 hover:text-brand-800 underline"
+                        title="Configure how deliveries are scheduled with this store"
+                      >
+                        {s.schedulingMethod ?? 'None'}
+                      </button>
+                    </td>
+                  )}
+                  {canEdit && (
+                    <td className="px-4 py-3">
+                      <button
                         onClick={() => setEditing(s)}
                         className="text-xs text-brand-600 hover:text-brand-800"
                         title="Edit this store"
@@ -1434,7 +1455,7 @@ function StoresTab({ showCompany }: CompanyDisplay) {
                 </tr>
               ))}
               {filtered.length === 0 && (
-                <tr><td colSpan={(showCompany ? 7 : 6) + (canEdit ? 1 : 0)} className="px-4 py-8 text-center text-gray-400">
+                <tr><td colSpan={(showCompany ? 7 : 6) + (canEdit ? 2 : 0)} className="px-4 py-8 text-center text-gray-400">
                   {stores.length === 0 ? 'No stores found.' : 'No stores match the current filter.'}
                 </td></tr>
               )}
@@ -1450,6 +1471,17 @@ function StoresTab({ showCompany }: CompanyDisplay) {
           onSaved={(patch) => {
             applyLocalUpdate(editing.id, patch)
             setEditing(null)
+          }}
+        />
+      )}
+
+      {schedulingFor && (
+        <SchedulingSettingsPanel
+          store={schedulingFor}
+          onCancel={() => setSchedulingFor(null)}
+          onSaved={(patch) => {
+            applyLocalUpdate(schedulingFor.id, patch)
+            setSchedulingFor(null)
           }}
         />
       )}
@@ -1694,6 +1726,637 @@ function EditStoreDialog({
         </div>
       </div>
     </div>
+  )
+}
+
+// ---- Scheduling Settings Panel ----
+// Per-store sub-interface opened from the Scheduling column of the Stores
+// tab. Switches between four method-specific layouts (Booking / Calendly /
+// Email / None). "Show Availability" hits the new
+// POST /api/stores/{id}/scheduling/availability endpoint with the current
+// form values so the operator can verify credentials before saving.
+
+function SchedulingSettingsPanel({
+  store,
+  onCancel,
+  onSaved,
+}: {
+  store: StoreLite
+  onCancel: () => void
+  onSaved: (patch: UpdateStorePayload) => void
+}) {
+  const [method, setMethod] = useState<SchedulingMethod>(store.schedulingMethod ?? 'None')
+  const [bookingClientId,     setBookingClientId]     = useState(store.bookingClientId      ?? '')
+  const [bookingClientSecret, setBookingClientSecret] = useState(store.bookingClientSecret  ?? '')
+  const [bookingCalendarName, setBookingCalendarName] = useState(store.bookingCalendarName  ?? '')
+  const [calendlyToken,       setCalendlyToken]       = useState(store.calendlyAccessToken  ?? '')
+  const [calendlyCalendar,    setCalendlyCalendar]    = useState(store.calendlyCalendarName ?? '')
+  const [emails,              setEmails]              = useState<string[]>(
+    () => parseEmailCsv(store.schedulingEmailRecipients ?? ''),
+  )
+
+  const [saving,   setSaving]   = useState(false)
+  const [error,    setError]    = useState('')
+  const [previewing, setPreviewing] = useState(false)
+  const [previewErr, setPreviewErr] = useState('')
+  const [slots,    setSlots]    = useState<AvailabilitySlot[] | null>(null)
+
+  async function handleSave() {
+    setSaving(true); setError('')
+    try {
+      const patch: UpdateStorePayload = {
+        schedulingMethod: method,
+        bookingClientId:           method === 'Booking'  ? bookingClientId.trim()     : null,
+        bookingClientSecret:       method === 'Booking'  ? bookingClientSecret.trim() : null,
+        bookingCalendarName:       method === 'Booking'  ? bookingCalendarName.trim() : null,
+        calendlyAccessToken:       method === 'Calendly' ? calendlyToken.trim()       : null,
+        calendlyCalendarName:      method === 'Calendly' ? calendlyCalendar.trim()    : null,
+        schedulingEmailRecipients: method === 'Email'    ? emails.join(', ')          : null,
+      }
+      await updateStore(store.id, patch)
+      onSaved(patch)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save scheduling settings.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleShowAvailability() {
+    setPreviewing(true); setPreviewErr(''); setSlots(null)
+    try {
+      const result = await getStoreSchedulingAvailability(store.id, {
+        method,
+        bookingClientId,
+        bookingClientSecret,
+        bookingCalendarName,
+        calendlyAccessToken: calendlyToken,
+        calendlyCalendarName: calendlyCalendar,
+        emailRecipients: emails.join(', '),
+      })
+      setSlots(result.slots)
+    } catch (e: unknown) {
+      // axios-style errors carry the server payload on .response.data
+      const err = e as { response?: { data?: { error?: string } }; message?: string }
+      setPreviewErr(err?.response?.data?.error ?? err?.message ?? 'Availability lookup failed.')
+    } finally {
+      setPreviewing(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+        <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">Scheduling — {store.name}</h2>
+            <p className="text-xs text-gray-500 mt-0.5">{store.licenseNumber}</p>
+          </div>
+          <button onClick={onCancel} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
+        </div>
+
+        <div className="p-5 space-y-5">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Scheduling Method</label>
+            <select
+              value={method}
+              onChange={(e) => { setMethod(e.target.value as SchedulingMethod); setSlots(null); setPreviewErr('') }}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400"
+            >
+              <option value="Booking">Booking (Microsoft)</option>
+              <option value="Calendly">Calendly</option>
+              <option value="Email">Email</option>
+              <option value="None">None</option>
+            </select>
+          </div>
+
+          {method === 'Booking' && (
+            <div className="space-y-3">
+              <Field label="Client Identifier" value={bookingClientId}     onChange={setBookingClientId} />
+              <Field label="Client Secret"     value={bookingClientSecret} onChange={setBookingClientSecret} />
+              <Field label="Calendar Name"     value={bookingCalendarName} onChange={setBookingCalendarName} />
+              <AvailabilityControls
+                onClick={handleShowAvailability}
+                disabled={previewing || !bookingClientId.trim() || !bookingClientSecret.trim() || !bookingCalendarName.trim()}
+                loading={previewing}
+              />
+            </div>
+          )}
+
+          {method === 'Calendly' && (
+            <div className="space-y-3">
+              <Field label="Personal Access Token" value={calendlyToken}    onChange={setCalendlyToken} />
+              <Field label="Calendar Name"         value={calendlyCalendar} onChange={setCalendlyCalendar} />
+              <AvailabilityControls
+                onClick={handleShowAvailability}
+                disabled={previewing || !calendlyToken.trim() || !calendlyCalendar.trim()}
+                loading={previewing}
+              />
+            </div>
+          )}
+
+          {method === 'Email' && (
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Recipient email addresses</label>
+                <EmailRecipientList emails={emails} onChange={setEmails} />
+              </div>
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                Please note that all optimized routes will be assumed confirmed until a user responds to this email
+                by pressing <strong>Confirm</strong> or <strong>Cancel</strong> in the email. The order's status is
+                <em> Tentative</em> until that moment, then flips to <em>Confirmed</em> or <em>Standby</em>.
+              </p>
+            </div>
+          )}
+
+          {method === 'None' && (
+            <p className="text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+              Please note that all optimized routes will be assumed confirmed until manually changed by an administrator.
+            </p>
+          )}
+
+          {previewErr && <p className="text-xs text-red-600">{previewErr}</p>}
+          {slots && <AvailabilitySlotList slots={slots} />}
+
+          {error && <p className="text-sm text-red-600">{error}</p>}
+        </div>
+
+        <div className="px-5 py-4 border-t border-gray-100 flex gap-2 justify-end">
+          <button onClick={onCancel} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900">Cancel</button>
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="px-4 py-2 bg-brand-500 text-white text-sm font-medium rounded-lg hover:bg-brand-600 disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function AvailabilityControls({ onClick, disabled, loading }: {
+  onClick: () => void
+  disabled: boolean
+  loading: boolean
+}) {
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        className="px-3 py-1.5 text-xs font-medium border border-brand-500 text-brand-700 rounded-lg hover:bg-brand-50 disabled:opacity-50"
+      >
+        {loading ? 'Checking…' : 'Show Availability'}
+      </button>
+      <p className="text-[11px] text-gray-400 mt-1">
+        Calls the provider with the credentials above and shows available windows for the next 7 days.
+      </p>
+    </div>
+  )
+}
+
+function AvailabilitySlotList({ slots }: { slots: AvailabilitySlot[] }) {
+  if (slots.length === 0) {
+    return <p className="text-xs text-gray-500">No available windows in the next 7 days.</p>
+  }
+  return (
+    <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-60 overflow-y-auto">
+      {slots.map((s, i) => {
+        const start = new Date(s.start)
+        const end   = new Date(s.end)
+        return (
+          <div key={i} className="px-3 py-2 text-xs flex items-center justify-between">
+            <span className="text-gray-700">
+              {format(start, 'EEE MMM d')} · {format(start, 'h:mm a')} – {format(end, 'h:mm a')}
+            </span>
+            {s.label && <span className="text-gray-400">{s.label}</span>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// Wire format on the server is one CSV column (Store.SchedulingEmailRecipients);
+// the UI works in arrays. Accept comma, semicolon, or newline as separator so
+// pasting from a spreadsheet column or wrapping line still parses cleanly.
+function parseEmailCsv(csv: string): string[] {
+  return csv
+    .split(/[,;\n\r]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+function EmailRecipientList({
+  emails,
+  onChange,
+}: {
+  emails: string[]
+  onChange: (next: string[]) => void
+}) {
+  // Track which row index is being modified. `null` = nothing in edit mode.
+  // Only one row editable at a time; clicking Modify on another row swaps.
+  const [editingIndex, setEditingIndex] = useState<number | null>(null)
+  const [editingValue, setEditingValue] = useState('')
+  const [newValue,     setNewValue]     = useState('')
+  const [error,        setError]        = useState('')
+
+  function addNew() {
+    const v = newValue.trim()
+    if (!v) return
+    if (!EMAIL_RE.test(v)) { setError('Enter a valid email address.'); return }
+    if (emails.includes(v)) { setError('That address is already in the list.'); return }
+    onChange([...emails, v])
+    setNewValue('')
+    setError('')
+  }
+
+  function startEdit(i: number) {
+    setEditingIndex(i)
+    setEditingValue(emails[i])
+    setError('')
+  }
+
+  function commitEdit() {
+    if (editingIndex === null) return
+    const v = editingValue.trim()
+    if (!v) { setError('Email cannot be blank.'); return }
+    if (!EMAIL_RE.test(v)) { setError('Enter a valid email address.'); return }
+    if (emails.some((e, j) => j !== editingIndex && e === v)) {
+      setError('That address is already in the list.'); return
+    }
+    const next = emails.slice()
+    next[editingIndex] = v
+    onChange(next)
+    setEditingIndex(null)
+    setEditingValue('')
+    setError('')
+  }
+
+  function cancelEdit() {
+    setEditingIndex(null)
+    setEditingValue('')
+    setError('')
+  }
+
+  function remove(i: number) {
+    onChange(emails.filter((_, j) => j !== i))
+    if (editingIndex === i) cancelEdit()
+  }
+
+  return (
+    <div className="space-y-2">
+      {emails.length > 0 && (
+        <div className="border border-gray-200 rounded-lg divide-y divide-gray-100">
+          {emails.map((email, i) => (
+            <div key={i} className="px-3 py-2 flex items-center gap-2">
+              {editingIndex === i ? (
+                <>
+                  <input
+                    type="email"
+                    value={editingValue}
+                    autoFocus
+                    onChange={(e) => setEditingValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') { e.preventDefault(); commitEdit() }
+                      if (e.key === 'Escape') { e.preventDefault(); cancelEdit() }
+                    }}
+                    className="flex-1 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-brand-400 font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={commitEdit}
+                    className="text-xs text-brand-700 hover:text-brand-900 font-medium"
+                  >
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    onClick={cancelEdit}
+                    className="text-xs text-gray-500 hover:text-gray-700"
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span className="flex-1 text-sm text-gray-700 font-mono break-all">{email}</span>
+                  <button
+                    type="button"
+                    onClick={() => startEdit(i)}
+                    className="text-xs text-brand-600 hover:text-brand-800"
+                  >
+                    Modify
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => remove(i)}
+                    className="text-xs text-red-600 hover:text-red-800"
+                  >
+                    Delete
+                  </button>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex items-center gap-2">
+        <input
+          type="email"
+          value={newValue}
+          onChange={(e) => setNewValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { e.preventDefault(); addNew() }
+          }}
+          placeholder="Add an email address"
+          className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400 font-mono"
+        />
+        <button
+          type="button"
+          onClick={addNew}
+          disabled={newValue.trim().length === 0}
+          className="px-3 py-2 text-xs font-medium border border-brand-500 text-brand-700 rounded-lg hover:bg-brand-50 disabled:opacity-50"
+        >
+          Add
+        </button>
+      </div>
+
+      {error && <p className="text-xs text-red-600">{error}</p>}
+    </div>
+  )
+}
+
+// ---- Communications Tab ----
+// Flat-table view of every store's scheduling settings so an operator can
+// fix or fill in credentials across the fleet without opening the per-store
+// sub-panel. No Save button — every dropdown change, input blur, and Enter
+// press writes through to PUT /api/stores/{id}.
+
+function CommunicationsTab({ showCompany }: CompanyDisplay) {
+  const { isRole } = useAuth()
+  // Mirrors the Stores tab gate: scheduling credentials are SuperAdmin-only
+  // because stores are shared master data across companies.
+  const canEdit = isRole('SuperAdmin')
+  const [stores, setStores] = useState<StoreLite[]>([])
+  const [loading, setLoading] = useState(true)
+  const [search,  setSearch]  = useState('')
+
+  useEffect(() => {
+    getStores().then(setStores).finally(() => setLoading(false))
+  }, [])
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    const base = [...stores].sort((a, b) => a.name.localeCompare(b.name))
+    if (!q) return base
+    return base.filter((s) =>
+      s.name.toLowerCase().includes(q)
+      || s.customer.toLowerCase().includes(q)
+      || (s.schedulingMethod ?? 'None').toLowerCase().includes(q)
+      || (showCompany ? (s.companies ?? []).some((c) => c.name.toLowerCase().includes(q)) : false),
+    )
+  }, [stores, search, showCompany])
+
+  function patchStoreLocal(id: string, patch: Partial<StoreLite>) {
+    setStores((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)))
+  }
+
+  if (loading) return <div className="flex items-center justify-center h-40 text-gray-400">Loading...</div>
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-3">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Filter by name, customer, method…"
+          className="flex-1 max-w-md px-3 py-1.5 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-400"
+        />
+        <span className="text-xs text-gray-500">
+          {filtered.length} of {stores.length}
+        </span>
+        <span className="text-xs text-gray-400 italic">Changes auto-save on blur or Enter.</span>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
+              <tr>
+                <th className="px-4 py-3 text-left font-medium w-1/4">Company</th>
+                <th className="px-4 py-3 text-left font-medium w-40">Method</th>
+                <th className="px-4 py-3 text-left font-medium">Credentials</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {filtered.map((s) => (
+                <CommunicationsRow
+                  key={s.id}
+                  store={s}
+                  showCompany={showCompany}
+                  canEdit={canEdit}
+                  onPatched={(patch) => patchStoreLocal(s.id, patch)}
+                />
+              ))}
+              {filtered.length === 0 && (
+                <tr><td colSpan={3} className="px-4 py-8 text-center text-gray-400">
+                  {stores.length === 0 ? 'No stores found.' : 'No stores match the current filter.'}
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CommunicationsRow({
+  store,
+  showCompany,
+  canEdit,
+  onPatched,
+}: {
+  store: StoreLite
+  showCompany: boolean
+  canEdit: boolean
+  onPatched: (patch: Partial<StoreLite>) => void
+}) {
+  const [method, setMethod] = useState<SchedulingMethod>(store.schedulingMethod ?? 'None')
+  const [emails, setEmails] = useState<string[]>(
+    () => parseEmailCsv(store.schedulingEmailRecipients ?? ''),
+  )
+  const [savingErr, setSavingErr] = useState('')
+
+  // Generic save helper. Optimistically updates the parent's cache so the
+  // row reflects the new value immediately; on failure we surface the error
+  // inline and leave the previous value displayed by re-syncing from the
+  // server response.
+  async function save(patch: UpdateStorePayload) {
+    try {
+      await updateStore(store.id, patch)
+      onPatched(patch as Partial<StoreLite>)
+      setSavingErr('')
+    } catch (e) {
+      setSavingErr(e instanceof Error ? e.message : 'Save failed.')
+    }
+  }
+
+  async function changeMethod(next: SchedulingMethod) {
+    const previous = method
+    setMethod(next)
+    try {
+      await updateStore(store.id, { schedulingMethod: next })
+      onPatched({ schedulingMethod: next })
+      setSavingErr('')
+    } catch (e) {
+      setMethod(previous)
+      setSavingErr(e instanceof Error ? e.message : 'Save failed.')
+    }
+  }
+
+  function saveEmails(next: string[]) {
+    setEmails(next)
+    void save({ schedulingEmailRecipients: next.join(', ') })
+  }
+
+  return (
+    <tr className="align-top">
+      <td className="px-4 py-3">
+        <div className="font-medium text-gray-900">{store.name}</div>
+        <div className="text-[11px] text-gray-500">
+          {store.customer}{store.city ? ` · ${store.city}` : ''}
+        </div>
+        {showCompany && (store.companies ?? []).length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {(store.companies ?? []).map((c) => (
+              <span key={c.id} className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-50 text-purple-700">{c.name}</span>
+            ))}
+          </div>
+        )}
+      </td>
+      <td className="px-4 py-3">
+        <select
+          value={method}
+          onChange={(e) => changeMethod(e.target.value as SchedulingMethod)}
+          disabled={!canEdit}
+          className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-brand-400 disabled:bg-gray-50 disabled:text-gray-500"
+        >
+          <option value="Booking">Booking</option>
+          <option value="Calendly">Calendly</option>
+          <option value="Email">Email</option>
+          <option value="None">None</option>
+        </select>
+      </td>
+      <td className="px-4 py-3">
+        {method === 'Booking' && (
+          <div className="grid grid-cols-3 gap-2">
+            <BlurSaveInput
+              label="Client Identifier"
+              initial={store.bookingClientId ?? ''}
+              disabled={!canEdit}
+              onSave={(v) => save({ bookingClientId: v })}
+            />
+            <BlurSaveInput
+              label="Client Secret"
+              initial={store.bookingClientSecret ?? ''}
+              disabled={!canEdit}
+              onSave={(v) => save({ bookingClientSecret: v })}
+            />
+            <BlurSaveInput
+              label="Calendar Name"
+              initial={store.bookingCalendarName ?? ''}
+              disabled={!canEdit}
+              onSave={(v) => save({ bookingCalendarName: v })}
+            />
+          </div>
+        )}
+        {method === 'Calendly' && (
+          <div className="grid grid-cols-2 gap-2">
+            <BlurSaveInput
+              label="Personal Access Token"
+              initial={store.calendlyAccessToken ?? ''}
+              disabled={!canEdit}
+              onSave={(v) => save({ calendlyAccessToken: v })}
+            />
+            <BlurSaveInput
+              label="Calendar Name"
+              initial={store.calendlyCalendarName ?? ''}
+              disabled={!canEdit}
+              onSave={(v) => save({ calendlyCalendarName: v })}
+            />
+          </div>
+        )}
+        {method === 'Email' && (
+          <EmailRecipientList emails={emails} onChange={saveEmails} />
+        )}
+        {method === 'None' && (
+          <span className="text-xs text-gray-400">Routes auto-confirmed; no credentials required.</span>
+        )}
+        {savingErr && <p className="text-xs text-red-600 mt-1">{savingErr}</p>}
+      </td>
+    </tr>
+  )
+}
+
+// Controlled text input that only fires onSave when the value actually
+// changes and the user commits (blur or Enter). Used by every row in the
+// Communications tab so per-keystroke PUT spam doesn't hit the API.
+function BlurSaveInput({
+  label,
+  initial,
+  disabled,
+  onSave,
+}: {
+  label: string
+  initial: string
+  disabled?: boolean
+  onSave: (value: string) => void
+}) {
+  const [value, setValue] = useState(initial)
+  const [lastSaved, setLastSaved] = useState(initial)
+
+  // If the parent's cache flips the field (e.g. another tab edits the same
+  // store), keep this input in sync — but only when the operator isn't
+  // mid-edit, which we approximate as "current value matches the last save".
+  useEffect(() => {
+    if (value === lastSaved) {
+      setValue(initial)
+      setLastSaved(initial)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initial])
+
+  function commit() {
+    const next = value.trim()
+    if (next === lastSaved) return
+    setLastSaved(next)
+    onSave(next)
+  }
+
+  return (
+    <label className="block">
+      <span className="block text-[10px] uppercase tracking-wide text-gray-500 mb-0.5">{label}</span>
+      <input
+        type="text"
+        value={value}
+        disabled={disabled}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); (e.currentTarget as HTMLInputElement).blur() }
+        }}
+        className="w-full px-2 py-1 text-xs font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-brand-400 disabled:bg-gray-50"
+      />
+    </label>
   )
 }
 

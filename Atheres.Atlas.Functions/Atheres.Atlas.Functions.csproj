@@ -43,6 +43,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Atheres.Atlas.Domain\Atheres.Atlas.Domain.csproj" />
     <ProjectReference Include="..\Atheres.Atlas.Data\Atheres.Atlas.Data.csproj" />
+    <ProjectReference Include="..\Atheres.Atlas.Scheduling\Atheres.Atlas.Scheduling.csproj" />
   </ItemGroup>
 
   <ItemGroup>

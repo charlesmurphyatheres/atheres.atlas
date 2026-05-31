@@ -20,4 +20,19 @@ public enum OrderStatus
     /// rows in this state are not picked up by future optimization runs.
     /// </summary>
     RouteOmitted = 10,
+
+    /// <summary>
+    /// Routed and scheduled via the Email scheduling method, but the store
+    /// recipient has not yet clicked Confirm or Cancel in the email. Treated
+    /// as a soft-confirmation: the route runs as planned unless the
+    /// recipient cancels, at which point the order flips to Standby.
+    /// </summary>
+    Tentative = 11,
+
+    /// <summary>
+    /// Store explicitly declined the proposed delivery slot (via the Cancel
+    /// link in the scheduling email, or via the scheduling provider). Held
+    /// out of routing until an administrator re-promotes or cancels it.
+    /// </summary>
+    Standby = 12,
 }

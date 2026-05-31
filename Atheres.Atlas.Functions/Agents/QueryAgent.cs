@@ -470,6 +470,19 @@ public class QueryAgent
                 s.Email,
                 s.Phone,
                 s.IsActive,
+                // Scheduling settings (per-store). Method always projected;
+                // credentials are projected as-is so the admin panel can
+                // pre-fill the sub-interface form. Secrets are surfaced
+                // unredacted — same trust boundary as the rest of the
+                // SuperAdmin Stores tab today (we already return the
+                // store's contact email + phone).
+                SchedulingMethod          = s.SchedulingMethod.ToString(),
+                s.BookingClientId,
+                s.BookingClientSecret,
+                s.BookingCalendarName,
+                s.CalendlyAccessToken,
+                s.CalendlyCalendarName,
+                s.SchedulingEmailRecipients,
                 Zone     = s.Zone == null ? null : s.Zone.Code,
                 District = s.Zone == null ? null : s.Zone.District.Name,
             })
