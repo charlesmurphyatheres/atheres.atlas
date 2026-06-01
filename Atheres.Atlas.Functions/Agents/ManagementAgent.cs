@@ -61,9 +61,20 @@ public class ManagementAgent
         HttpRequest req,
         CancellationToken ct)
     {
-        var trucks = await _db.Trucks
+        var query = _db.Trucks
             .Include(t => t.Hub)
-            .Where(t => t.IsActive)
+            .Where(t => t.IsActive);
+
+        // SuperAdmin sees every company's trucks by default (the EF global
+        // company filter is a no-op for them); allow scoping to one company
+        // via ?companyId={guid}. A blank or empty-Guid value means "all
+        // companies" — keep the full cross-company list.
+        if (req.HttpContext.User.IsInRole(Roles.SuperAdmin)
+            && Guid.TryParse(req.Query["companyId"], out var filterCompanyId)
+            && filterCompanyId != Guid.Empty)
+            query = query.Where(t => t.CompanyId == filterCompanyId);
+
+        var trucks = await query
             .OrderBy(t => t.Name)
             .Select(t => new
             {

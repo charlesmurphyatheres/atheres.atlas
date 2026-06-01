@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Atheres.Atlas.Data;
+using Atheres.Atlas.Data.Services;
 using Atheres.Atlas.Domain.Constants;
 using Atheres.Atlas.Domain.Entities;
 using Microsoft.AspNetCore.Authorization;
@@ -9,24 +10,32 @@ using Microsoft.Azure.Functions.Worker;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
-namespace Atheres.Atlas.Auth.Functions.Functions;
+namespace Atheres.Atlas.Functions.Agents;
 
 /// <summary>
 /// Hub management — company home base / operations center.
 /// Routes start and end at a hub. A company can have multiple hubs.
+///
+/// Tenant scoping is handled by the AtlasDbContext global query filter
+/// (driven by ICompanyContext): a company Admin sees / touches only their own
+/// hubs, a SuperAdmin (null company context) any company's. A SuperAdmin can
+/// scope a listing to a single company via ?companyId={guid} (or the
+/// X-Company-Id header honored by HttpCompanyContext).
 /// </summary>
 public class HubFunctions
 {
     private readonly AtlasDbContext _db;
+    private readonly ICompanyContext _company;
     private readonly ILogger<HubFunctions> _log;
 
     private static readonly JsonSerializerOptions _json =
         new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
-    public HubFunctions(AtlasDbContext db, ILogger<HubFunctions> log)
+    public HubFunctions(AtlasDbContext db, ICompanyContext company, ILogger<HubFunctions> log)
     {
-        _db  = db;
-        _log = log;
+        _db      = db;
+        _company = company;
+        _log     = log;
     }
 
     [Function("hubs-list")]
@@ -35,11 +44,15 @@ public class HubFunctions
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "hubs")]
         HttpRequest req, CancellationToken ct)
     {
-        var companyId = GetCallerCompanyId(req);
-
+        // The global query filter already scopes a company Admin to their own
+        // hubs and lets a SuperAdmin (null company context) see all. SuperAdmin
+        // may further scope to one company via ?companyId={guid}; a blank or
+        // empty-Guid value means "all companies" — keep the full list.
         var query = _db.Hubs.Where(h => h.IsActive);
-        if (!req.HttpContext.User.IsInRole(Roles.SuperAdmin) && companyId.HasValue)
-            query = query.Where(h => h.CompanyId == companyId.Value);
+        if (req.HttpContext.User.IsInRole(Roles.SuperAdmin)
+            && Guid.TryParse(req.Query["companyId"], out var filterCompanyId)
+            && filterCompanyId != Guid.Empty)
+            query = query.Where(h => h.CompanyId == filterCompanyId);
 
         var hubs = await query
             .OrderBy(h => h.Name)
@@ -70,18 +83,23 @@ public class HubFunctions
         if (dto is null || string.IsNullOrWhiteSpace(dto.Name) || string.IsNullOrWhiteSpace(dto.Address))
             return new BadRequestObjectResult(new { error = "Name and Address are required." });
 
-        var companyId = GetCallerCompanyId(req);
-        if (!companyId.HasValue && !req.HttpContext.User.IsInRole(Roles.SuperAdmin))
+        // Create can't be enforced by the read-side query filter, so the target
+        // company is resolved + authorized explicitly: it comes from the
+        // caller's context, and a SuperAdmin (null context) must name it via the
+        // DTO. A company Admin may only create hubs for their own company.
+        var isSuperAdmin = req.HttpContext.User.IsInRole(Roles.SuperAdmin);
+        var callerCompanyId = _company.CompanyId;
+
+        var targetCompanyId = dto.CompanyId ?? callerCompanyId;
+        if (targetCompanyId is null)
             return new BadRequestObjectResult(new { error = "Company context required." });
 
-        var targetCompanyId = dto.CompanyId ?? companyId!.Value;
-
-        if (!req.HttpContext.User.IsInRole(Roles.SuperAdmin) && targetCompanyId != companyId)
+        if (!isSuperAdmin && targetCompanyId != callerCompanyId)
             return Forbid();
 
         var hub = new Hub
         {
-            CompanyId = targetCompanyId,
+            CompanyId = targetCompanyId.Value,
             Name      = dto.Name,
             Address   = dto.Address,
             City      = dto.City ?? string.Empty,
@@ -109,21 +127,19 @@ public class HubFunctions
         [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "hubs/{id:guid}")]
         HttpRequest req, Guid id, CancellationToken ct)
     {
-        var hub = await _db.Hubs.FindAsync([id], ct);
+        // Global query filter scopes this lookup: a company Admin can't load a
+        // hub outside their tenant (returns null -> 404); SuperAdmin sees all.
+        var hub = await _db.Hubs.FirstOrDefaultAsync(h => h.Id == id, ct);
         if (hub is null) return new NotFoundObjectResult(new { error = "Hub not found." });
-
-        if (!CanAccess(req, hub.CompanyId))
-            return Forbid();
 
         UpdateHubDto? dto;
         try { dto = await JsonSerializer.DeserializeAsync<UpdateHubDto>(req.Body, _json, ct); }
         catch { return new BadRequestObjectResult(new { error = "Invalid JSON." }); }
 
         // Track address changes so we can invalidate the cached geocode
-        // when the physical location moved. Auth.Functions doesn't talk
-        // to Google Maps directly; nulling the coords here makes the
-        // main Functions' RouteOptimizationAgent re-geocode lazily on
-        // the next routing run and persist the fresh result.
+        // when the physical location moved. The main Functions'
+        // RouteOptimizationAgent re-geocodes lazily on the next routing run
+        // and persists the fresh result.
         var addressChanged =
             (!string.IsNullOrWhiteSpace(dto?.Address) && !string.Equals(hub.Address, dto.Address, StringComparison.Ordinal))
             || (dto?.City  is not null && !string.Equals(hub.City,  dto.City,  StringComparison.Ordinal))
@@ -159,11 +175,8 @@ public class HubFunctions
         [HttpTrigger(AuthorizationLevel.Anonymous, "delete", Route = "hubs/{id:guid}")]
         HttpRequest req, Guid id, CancellationToken ct)
     {
-        var hub = await _db.Hubs.FindAsync([id], ct);
+        var hub = await _db.Hubs.FirstOrDefaultAsync(h => h.Id == id, ct);
         if (hub is null) return new NotFoundObjectResult(new { error = "Hub not found." });
-
-        if (!CanAccess(req, hub.CompanyId))
-            return Forbid();
 
         hub.IsActive  = false;
         hub.UpdatedAt = DateTime.UtcNow;
@@ -171,19 +184,6 @@ public class HubFunctions
 
         _log.LogInformation("Hub deactivated: {Id}", id);
         return new OkObjectResult(new { message = "Hub deactivated." });
-    }
-
-    private bool CanAccess(HttpRequest req, Guid companyId)
-    {
-        if (req.HttpContext.User.IsInRole(Roles.SuperAdmin)) return true;
-        var claim = req.HttpContext.User.FindFirst("companyId")?.Value;
-        return Guid.TryParse(claim, out var id) && id == companyId;
-    }
-
-    private static Guid? GetCallerCompanyId(HttpRequest req)
-    {
-        var claim = req.HttpContext.User.FindFirst("companyId")?.Value;
-        return Guid.TryParse(claim, out var id) ? id : null;
     }
 
     private static IActionResult Forbid() =>

@@ -1,6 +1,7 @@
 using Atheres.Atlas.Data;
 using Atheres.Atlas.Data.Repositories;
 using Atheres.Atlas.Data.Services;
+using Atheres.Atlas.Domain.Constants;
 using Atheres.Atlas.Domain.Enums;
 using Atheres.Atlas.Domain.Messages;
 using Atheres.Atlas.Functions.Services;
@@ -446,10 +447,21 @@ public class QueryAgent
         // empty Name and/or LicenseNumber. They render as blank rows in the
         // dashboard, so skip them server-side rather than asking every caller
         // to filter. import-data.ps1 also deactivates these on next run.
-        var stores = await _db.Stores
+        var query = _db.Stores
             .Where(s => s.IsActive
                      && s.Name          != null && s.Name          != ""
-                     && s.LicenseNumber != null && s.LicenseNumber != "")
+                     && s.LicenseNumber != null && s.LicenseNumber != "");
+
+        // SuperAdmin sees every company's stores by default (the EF global
+        // company filter is a no-op for them); allow scoping to one company
+        // via ?companyId={guid}. A blank or empty-Guid value means "all
+        // companies" — keep the full cross-company list.
+        if (req.HttpContext.User.IsInRole(Roles.SuperAdmin)
+            && Guid.TryParse(req.Query["companyId"], out var filterCompanyId)
+            && filterCompanyId != Guid.Empty)
+            query = query.Where(s => s.Companies.Any(c => c.Id == filterCompanyId));
+
+        var stores = await query
             .OrderBy(s => s.Name)
             .Select(s => new
             {

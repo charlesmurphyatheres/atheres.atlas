@@ -18,14 +18,8 @@ export default defineConfig({
         target: 'http://localhost:7072',
         changeOrigin: true,
       },
-      '/api/warehouses': {
-        target: 'http://localhost:7072',
-        changeOrigin: true,
-      },
-      '/api/hubs': {
-        target: 'http://localhost:7072',
-        changeOrigin: true,
-      },
+      // Hubs and Warehouses moved to the main Function App (:7071); they fall
+      // through the '/api' rule below. Only auth/users/companies stay on :7072.
       '/api': {
         target: 'http://localhost:7071',
         changeOrigin: true,

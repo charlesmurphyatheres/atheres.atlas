@@ -72,16 +72,23 @@ export default function AdminPanel() {
         ))}
       </div>
 
-      {tab === 'orders' && <OrdersTab {...display} />}
-      {tab === 'routes' && <RoutesTab {...display} />}
-      {tab === 'hubs' && <HubsTab {...display} />}
-      {tab === 'vans' && <VansTab {...display} />}
-      {tab === 'warehouses' && <WarehousesTab {...display} />}
-      {tab === 'stores' && <StoresTab {...display} />}
-      {tab === 'communications' && <CommunicationsTab {...display} />}
-      {tab === 'districts' && <DistrictsTab {...display} />}
-      {tab === 'users' && <UsersTab {...display} />}
-      {tab === 'audits' && <OptimizationAuditsTab />}
+      {/* Key the active tab's subtree on the selected company so changing the
+          company picker (SuperAdmin) remounts it — re-running each tab's data
+          load with the new X-Company-Id scope and refreshing the Company
+          column — instead of leaving stale rows on screen. 'all' stands in for
+          the "All Companies" (null) selection. */}
+      <div key={activeCompanyId ?? 'all'}>
+        {tab === 'orders' && <OrdersTab {...display} />}
+        {tab === 'routes' && <RoutesTab {...display} />}
+        {tab === 'hubs' && <HubsTab {...display} />}
+        {tab === 'vans' && <VansTab {...display} />}
+        {tab === 'warehouses' && <WarehousesTab {...display} />}
+        {tab === 'stores' && <StoresTab {...display} />}
+        {tab === 'communications' && <CommunicationsTab {...display} />}
+        {tab === 'districts' && <DistrictsTab {...display} />}
+        {tab === 'users' && <UsersTab {...display} />}
+        {tab === 'audits' && <OptimizationAuditsTab />}
+      </div>
     </div>
   )
 }

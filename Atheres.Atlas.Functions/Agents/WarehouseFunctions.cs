@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Atheres.Atlas.Data;
+using Atheres.Atlas.Data.Services;
 using Atheres.Atlas.Domain.Constants;
 using Atheres.Atlas.Domain.Entities;
 using Microsoft.AspNetCore.Authorization;
@@ -9,24 +10,32 @@ using Microsoft.Azure.Functions.Worker;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
-namespace Atheres.Atlas.Auth.Functions.Functions;
+namespace Atheres.Atlas.Functions.Agents;
 
 /// <summary>
-/// Warehouse management — external pickup locations.
-/// Admin manages warehouses for their own company; SuperAdmin for any.
+/// Warehouse management — external pickup locations. A warehouse can be shared
+/// by several companies (many-to-many).
+///
+/// Tenant scoping is handled by the AtlasDbContext global query filter
+/// (driven by ICompanyContext): a company Admin sees / touches only warehouses
+/// linked to their company, a SuperAdmin (null company context) any. A
+/// SuperAdmin can scope a listing to one company via ?companyId={guid} (or the
+/// X-Company-Id header honored by HttpCompanyContext).
 /// </summary>
 public class WarehouseFunctions
 {
     private readonly AtlasDbContext _db;
+    private readonly ICompanyContext _company;
     private readonly ILogger<WarehouseFunctions> _log;
 
     private static readonly JsonSerializerOptions _json =
         new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
-    public WarehouseFunctions(AtlasDbContext db, ILogger<WarehouseFunctions> log)
+    public WarehouseFunctions(AtlasDbContext db, ICompanyContext company, ILogger<WarehouseFunctions> log)
     {
-        _db  = db;
-        _log = log;
+        _db      = db;
+        _company = company;
+        _log     = log;
     }
 
     // -----------------------------------------------------------------------
@@ -38,14 +47,15 @@ public class WarehouseFunctions
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "warehouses")]
         HttpRequest req, CancellationToken ct)
     {
-        var companyId = GetCallerCompanyId(req);
-
-        // SuperAdmin sees every active warehouse across tenants; everyone else
-        // sees only the ones whose join-table row matches their claim. Same
-        // guarantee as before, expressed through the many-to-many.
-        var query = _db.Warehouses.IgnoreQueryFilters().Where(w => w.IsActive);
-        if (!req.HttpContext.User.IsInRole(Roles.SuperAdmin) && companyId.HasValue)
-            query = query.Where(w => w.Companies.Any(c => c.Id == companyId.Value));
+        // The global query filter already scopes a company Admin to warehouses
+        // linked to their company and lets a SuperAdmin (null company context)
+        // see all. SuperAdmin may further scope to one company via
+        // ?companyId={guid}; a blank or empty-Guid value means "all companies".
+        var query = _db.Warehouses.Where(w => w.IsActive);
+        if (req.HttpContext.User.IsInRole(Roles.SuperAdmin)
+            && Guid.TryParse(req.Query["companyId"], out var filterCompanyId)
+            && filterCompanyId != Guid.Empty)
+            query = query.Where(w => w.Companies.Any(c => c.Id == filterCompanyId));
 
         var warehouses = await query
             .OrderBy(w => w.BusinessName)
@@ -88,20 +98,27 @@ public class WarehouseFunctions
         if (dto is null || string.IsNullOrWhiteSpace(dto.BusinessName) || string.IsNullOrWhiteSpace(dto.Address))
             return new BadRequestObjectResult(new { error = "BusinessName and Address are required." });
 
-        var companyId = GetCallerCompanyId(req);
-        if (!companyId.HasValue && !req.HttpContext.User.IsInRole(Roles.SuperAdmin))
+        // Create can't be enforced by the read-side query filter, so the target
+        // company is resolved + authorized explicitly: it comes from the
+        // caller's context, and a SuperAdmin (null context) must name it via the
+        // DTO. A company Admin may only create warehouses for their own company.
+        var isSuperAdmin = req.HttpContext.User.IsInRole(Roles.SuperAdmin);
+        var callerCompanyId = _company.CompanyId;
+
+        var targetCompanyId = dto.CompanyId ?? callerCompanyId;
+        if (targetCompanyId is null)
             return new BadRequestObjectResult(new { error = "Company context required." });
 
-        var targetCompanyId = dto.CompanyId ?? companyId!.Value;
-
-        // Company Admin can only add to their own company
-        if (!req.HttpContext.User.IsInRole(Roles.SuperAdmin) && targetCompanyId != companyId)
+        if (!isSuperAdmin && targetCompanyId != callerCompanyId)
             return Forbid();
 
         // Multi-tenant: a new warehouse starts linked to the target company.
         // Additional companies can be attached later through a future
         // sharing endpoint; for now Create only adds the single membership.
-        var targetCompany = await _db.Companies.FindAsync([targetCompanyId], ct);
+        // IgnoreQueryFilters so a SuperAdmin (whose context is null) and a
+        // company Admin alike can resolve the target Company row.
+        var targetCompany = await _db.Companies.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(c => c.Id == targetCompanyId.Value, ct);
         if (targetCompany is null)
             return new BadRequestObjectResult(new { error = "Target company not found." });
 
@@ -141,13 +158,10 @@ public class WarehouseFunctions
         [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "warehouses/{id:guid}")]
         HttpRequest req, Guid id, CancellationToken ct)
     {
-        var warehouse = await _db.Warehouses.IgnoreQueryFilters()
-            .Include(w => w.Companies)
-            .FirstOrDefaultAsync(w => w.Id == id, ct);
+        // Global query filter scopes this lookup: a company Admin can't load a
+        // warehouse outside their tenant (returns null -> 404); SuperAdmin all.
+        var warehouse = await _db.Warehouses.FirstOrDefaultAsync(w => w.Id == id, ct);
         if (warehouse is null) return new NotFoundObjectResult(new { error = "Warehouse not found." });
-
-        if (!CanAccess(req, warehouse.Companies.Select(c => c.Id)))
-            return Forbid();
 
         UpdateWarehouseDto? dto;
         try { dto = await JsonSerializer.DeserializeAsync<UpdateWarehouseDto>(req.Body, _json, ct); }
@@ -205,13 +219,8 @@ public class WarehouseFunctions
         [HttpTrigger(AuthorizationLevel.Anonymous, "delete", Route = "warehouses/{id:guid}")]
         HttpRequest req, Guid id, CancellationToken ct)
     {
-        var warehouse = await _db.Warehouses.IgnoreQueryFilters()
-            .Include(w => w.Companies)
-            .FirstOrDefaultAsync(w => w.Id == id, ct);
+        var warehouse = await _db.Warehouses.FirstOrDefaultAsync(w => w.Id == id, ct);
         if (warehouse is null) return new NotFoundObjectResult(new { error = "Warehouse not found." });
-
-        if (!CanAccess(req, warehouse.Companies.Select(c => c.Id)))
-            return Forbid();
 
         warehouse.IsActive  = false;
         warehouse.UpdatedAt = DateTime.UtcNow;
@@ -219,22 +228,6 @@ public class WarehouseFunctions
 
         _log.LogInformation("Warehouse deactivated: {Id}", id);
         return new OkObjectResult(new { message = "Warehouse deactivated." });
-    }
-
-    // -----------------------------------------------------------------------
-    /// <summary>SuperAdmin can touch any warehouse. Company Admin can touch a
-    /// warehouse only if their company is in the warehouse's company list.</summary>
-    private bool CanAccess(HttpRequest req, IEnumerable<Guid> warehouseCompanyIds)
-    {
-        if (req.HttpContext.User.IsInRole(Roles.SuperAdmin)) return true;
-        var claim = req.HttpContext.User.FindFirst("companyId")?.Value;
-        return Guid.TryParse(claim, out var id) && warehouseCompanyIds.Contains(id);
-    }
-
-    private static Guid? GetCallerCompanyId(HttpRequest req)
-    {
-        var claim = req.HttpContext.User.FindFirst("companyId")?.Value;
-        return Guid.TryParse(claim, out var id) ? id : null;
     }
 
     private static IActionResult Forbid() =>
