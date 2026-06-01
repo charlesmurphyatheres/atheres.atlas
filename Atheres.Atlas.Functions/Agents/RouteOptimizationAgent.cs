@@ -89,9 +89,9 @@ public class RouteOptimizationAgent
             ?? throw new InvalidOperationException($"Hub {effectiveHubId} not found.");
 
         // First-use geocode self-heal for the hub. Hubs are created via
-        // Auth.Functions HubFunctions.Create which doesn't (and can't
-        // easily) call Google Maps; we cache the result here on the way
-        // into the routing pipeline so subsequent runs skip the lookup.
+        // HubFunctions.Create which doesn't (and can't easily) call Google
+        // Maps; we cache the result here on the way into the routing pipeline
+        // so subsequent runs skip the lookup.
         await EnsureHubGeocodedAsync(hub, ct);
 
         // Load the company so we can read company-wide delivery window. The
