@@ -115,3 +115,5 @@ docker-compose.override.yml
 *.swp
 *.tmp
 *.temp
+
+notes/BookingApplicationCredentials.txt

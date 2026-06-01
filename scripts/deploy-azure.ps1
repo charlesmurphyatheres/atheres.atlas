@@ -950,21 +950,23 @@ foreach ($og in $originGroups) {
 # ----- Routes (most specific first, all linked to default domain) -----
 #
 # Azure Front Door Standard only accepts patterns ending with `/*` (or a bare
-# `/*` catch-all). Exact paths ("/api/warehouses") and segment-stars
-# ("/api/warehouses*") both return BadRequest. This means a collection
-# endpoint has to be called with a trailing slash ("/api/warehouses/") to
-# match /api/warehouses/*; the frontend does this explicitly in apiService.ts
-# for /api/{companies,hubs,warehouses,users} which live in the auth app.
-# Without the trailing slash the request falls through to /api/* -> the main
-# Function App, which doesn't own those endpoints, and returns 404.
+# `/*` catch-all). Exact paths ("/api/companies") and segment-stars
+# ("/api/companies*") both return BadRequest. This means a collection
+# endpoint has to be called with a trailing slash ("/api/companies/") to
+# match /api/companies/*; the frontend does this explicitly in apiService.ts
+# for /api/{companies,users} which live in the auth app. Without the trailing
+# slash the request falls through to /api/* -> the main Function App.
+#
+# Hubs and Warehouses used to live in the auth app too, but moved to the main
+# Function App. They now intentionally fall through /api/* -> og-functions-main
+# with no dedicated route; see $deprecatedRoutes below, which deletes the old
+# og-functions-auth routes from existing deployments.
 
 $routeDefs = @(
     @{ Name="route-signalr";     Group="og-functions-main"; Patterns=@("/api/negotiate/*") },
     @{ Name="route-auth";        Group="og-functions-auth"; Patterns=@("/api/auth/*") },
     @{ Name="route-users";       Group="og-functions-auth"; Patterns=@("/api/users/*") },
     @{ Name="route-companies";   Group="og-functions-auth"; Patterns=@("/api/companies/*") },
-    @{ Name="route-warehouses";  Group="og-functions-auth"; Patterns=@("/api/warehouses/*") },
-    @{ Name="route-hubs";        Group="og-functions-auth"; Patterns=@("/api/hubs/*") },
     @{ Name="route-api";         Group="og-functions-main"; Patterns=@("/api/*") },
     @{ Name="route-frontend";    Group="og-frontend";       Patterns=@("/*") }
 )
@@ -993,6 +995,51 @@ foreach ($r in $routeDefs) {
             )
             & az @createArgs
         }.GetNewClosure()
+}
+
+# ----- Remove deprecated routes -----
+#
+# Hubs and Warehouses moved from the Auth Function App to the main Function App;
+# they now flow through the /api/* catch-all -> og-functions-main and no longer
+# have dedicated routes in $routeDefs. Removing the entries above stops NEW
+# deployments from creating them, but the create loop never deletes a route, so
+# existing deployments would keep the stale og-functions-auth routes and keep
+# sending /api/hubs/* and /api/warehouses/* to the auth app. Delete them here.
+$deprecatedRoutes = @('route-hubs', 'route-warehouses')
+$purgedAnyRoute = $false
+foreach ($dr in $deprecatedRoutes) {
+    $exists = az afd route show `
+        --resource-group $ResourceGroup `
+        --profile-name $FrontDoorProfile `
+        --endpoint-name $FrontDoorName `
+        --route-name $dr `
+        --query "name" -o tsv 2>$null
+    if ($exists) {
+        Write-Host "  [delete] deprecated route $dr (moved to main Function App)" -ForegroundColor Yellow
+        az afd route delete `
+            --resource-group $ResourceGroup `
+            --profile-name $FrontDoorProfile `
+            --endpoint-name $FrontDoorName `
+            --route-name $dr `
+            --yes --output none 2>$null
+        $purgedAnyRoute = $true
+    } else {
+        Write-Host "  [skip] deprecated route $dr already absent" -ForegroundColor DarkGray
+    }
+}
+
+# After deleting a route the edge POPs keep serving the old origin (and
+# negative-cache the 404s the deleted route briefly produced), so the move looks
+# broken until the cache clears. Purge the affected paths so /api/hubs/* and
+# /api/warehouses/* immediately resolve to the main Function App.
+if ($purgedAnyRoute) {
+    Write-Host "  [purge] AFD edge cache for /api/hubs/* and /api/warehouses/*" -ForegroundColor Yellow
+    az afd endpoint purge `
+        --resource-group $ResourceGroup `
+        --profile-name $FrontDoorProfile `
+        --endpoint-name $FrontDoorName `
+        --content-paths "/api/hubs/*" "/api/warehouses/*" `
+        --output none 2>$null
 }
 
 # ----- Custom Domain + Managed SSL Certificate -----
