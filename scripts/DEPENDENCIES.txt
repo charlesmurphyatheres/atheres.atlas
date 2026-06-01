@@ -1,0 +1,259 @@
+================================================================================
+  ATHERES ATLAS — EXTERNAL DEPENDENCIES & SETUP ITINERARY
+================================================================================
+
+Complete this checklist before running the application locally or deploying
+to Azure. Each section includes where to find the value and where to put it.
+
+--------------------------------------------------------------------------------
+1. GOOGLE MAPS PLATFORM
+--------------------------------------------------------------------------------
+Purpose   : Address geocoding (validation) and multi-stop route optimization
+APIs Used : Geocoding API, Directions API
+
+Steps:
+  [ ] Go to https://console.cloud.google.com
+  [ ] Create or select a project
+  [ ] Enable "Geocoding API"
+  [ ] Enable "Directions API"
+  [ ] Create an API Key under APIs & Services > Credentials
+  [ ] (Recommended) Restrict key to Geocoding API + Directions API only
+  [ ] Copy the key
+
+Where to put it:
+  - Functions/local.settings.json  →  "GoogleMapsApiKey": "<key>"
+  - Azure Function App             →  App Setting: GoogleMapsApiKey
+  - FrontEnd/.env                  →  VITE_GOOGLE_MAPS_KEY=<key>    (for map display)
+
+Cost note : Both APIs have a free monthly credit ($200/mo as of 2024).
+            Geocoding ~$5/1000 calls. Directions ~$10/1000 calls.
+
+--------------------------------------------------------------------------------
+2. SENDGRID (Email)
+--------------------------------------------------------------------------------
+Purpose   : Sending delivery confirmation emails to stores
+
+Steps:
+  [ ] Go to https://app.sendgrid.com
+  [ ] Create a free account (100 emails/day free tier)
+  [ ] Complete Sender Identity verification (domain or single sender)
+  [ ] Go to Settings > API Keys > Create API Key
+  [ ] Select "Restricted Access" → Mail Send: Full Access
+  [ ] Copy the API key (shown only once)
+
+Where to put it:
+  - Functions/local.settings.json  →  "SendGridApiKey": "<key>"
+  - Functions/local.settings.json  →  "SendGridFromEmail": "noreply@yourdomain.com"
+  - Functions/local.settings.json  →  "SendGridFromName": "Atheres Atlas Delivery"
+  - Azure Function App             →  App Settings: SendGridApiKey,
+                                       SendGridFromEmail, SendGridFromName
+
+Important : The "From" email address must match a verified sender in SendGrid
+            or emails will be rejected.
+
+--------------------------------------------------------------------------------
+3. TWILIO (SMS)
+--------------------------------------------------------------------------------
+Purpose   : Sending confirmation SMS to stores; receiving "CONFIRM" replies
+            via webhook (POST /api/confirmations/sms-webhook)
+
+Steps:
+  [ ] Go to https://www.twilio.com/console
+  [ ] Create a free account ($15 trial credit included)
+  [ ] Get a Twilio phone number (trial allows 1 free number)
+  [ ] From the Console Dashboard, copy:
+        Account SID  (starts with AC...)
+        Auth Token   (click to reveal)
+  [ ] Copy your Twilio phone number (E.164 format: +15551234567)
+
+Webhook setup (for inbound SMS confirmations):
+  [ ] In Twilio console, go to Phone Numbers > Manage > Active Numbers
+  [ ] Select your number
+  [ ] Under "Messaging" > "A message comes in":
+        URL: https://<your-functions-url>/api/confirmations/sms-webhook
+        Method: HTTP POST
+
+Where to put it:
+  - Functions/local.settings.json  →  "TwilioAccountSid": "AC..."
+  - Functions/local.settings.json  →  "TwilioAuthToken": "<token>"
+  - Functions/local.settings.json  →  "TwilioFromNumber": "+15551234567"
+  - Azure Function App             →  App Settings: TwilioAccountSid,
+                                       TwilioAuthToken, TwilioFromNumber
+
+--------------------------------------------------------------------------------
+4. AZURE SERVICE BUS
+--------------------------------------------------------------------------------
+Purpose   : Message backbone between all 6 agents
+
+Steps:
+  [ ] Go to Azure Portal > Create a resource > Service Bus
+  [ ] Create a Namespace (Standard tier minimum — Basic does not support topics)
+  [ ] Inside the namespace, create the following 7 QUEUES:
+
+        Queue Name                    Purpose
+        ----------------------------  ------------------------------------
+        atlas-orders-ingest           Raw orders for validation/geocoding
+        atlas-routes-optimize         Validated orders awaiting routing
+        atlas-confirmations-send      Orders ready for email/SMS outreach
+        atlas-confirmations-received  Store confirmation responses
+        atlas-reschedule              Orders that missed the deadline
+        atlas-notifications           Real-time UI updates via SignalR
+        atlas-audit                   All agent events for audit logging
+
+  [ ] Go to Shared Access Policies > RootManageSharedAccessKey
+  [ ] Copy the Primary Connection String
+
+Where to put it:
+  - Functions/local.settings.json  →  "ServiceBusConnection": "<connection string>"
+  - Azure Function App             →  App Setting: ServiceBusConnection
+
+Tip: Enable "Dead Letter" monitoring in Azure Portal to catch failed messages.
+
+--------------------------------------------------------------------------------
+5. AZURE SIGNALR SERVICE
+--------------------------------------------------------------------------------
+Purpose   : Real-time push notifications to the React frontend dashboard
+
+Steps:
+  [ ] Go to Azure Portal > Create a resource > SignalR Service
+  [ ] Choose the "Serverless" service mode (required for Azure Functions)
+  [ ] Free tier (F1): 20 concurrent connections, 20,000 messages/day
+  [ ] Go to the resource > Keys
+  [ ] Copy the Primary Connection String
+
+Where to put it:
+  - Functions/local.settings.json  →  "AzureSignalRConnectionString": "<conn string>"
+  - Azure Function App             →  App Setting: AzureSignalRConnectionString
+
+Important : Service mode MUST be set to "Serverless" — not "Classic" or "Default".
+            This can only be set at creation time on some tiers.
+
+--------------------------------------------------------------------------------
+6. AZURE SQL DATABASE
+--------------------------------------------------------------------------------
+Purpose   : Persistent storage for orders, routes, confirmations, audit logs
+
+Steps:
+  [ ] Go to Azure Portal > Create a resource > SQL Database
+  [ ] Create a new SQL Server if needed (note the admin username/password)
+  [ ] Database name: AtheresAtlas (or your preference)
+  [ ] Choose pricing tier (Basic is fine for dev; General Purpose for prod)
+  [ ] Under Networking > Allow Azure services: YES
+  [ ] Copy the ADO.NET connection string from the Connection Strings blade
+
+  [ ] Run EF Core migrations to create the schema:
+        cd Atheres.Atlas.Data
+        dotnet ef migrations add InitialCreate \
+          --startup-project ../Atheres.Atlas.Functions
+        dotnet ef database update \
+          --startup-project ../Atheres.Atlas.Functions
+
+Where to put it:
+  - Functions/local.settings.json  →  "SqlConnectionString": "<connection string>"
+  - Azure Function App             →  App Setting: SqlConnectionString
+
+Local dev: SQL Server LocalDB or Docker works fine:
+  "Server=localhost;Database=AtheresAtlas;Trusted_Connection=True;TrustServerCertificate=True;"
+
+--------------------------------------------------------------------------------
+7. AZURE FUNCTION APP (Hosting)
+--------------------------------------------------------------------------------
+Purpose   : Hosts all 6 agent functions in the cloud
+
+Steps:
+  [ ] Go to Azure Portal > Create a resource > Function App
+  [ ] Runtime stack: .NET 8, OS: Windows, Plan: Consumption (Serverless)
+  [ ] After creation, go to Configuration > Application Settings
+  [ ] Add ALL the keys from local.settings.json (except AzureWebJobsStorage
+      and FUNCTIONS_WORKER_RUNTIME — Azure sets those automatically)
+
+  [ ] Set the public URL of the Function App:
+        App Setting: FunctionHostUrl = https://<your-app>.azurewebsites.net
+
+  [ ] Publish from Visual Studio or via:
+        dotnet publish -c Release
+        func azure functionapp publish <AppName>
+
+--------------------------------------------------------------------------------
+8. NUGET PACKAGES (pre-pinned in .csproj files)
+--------------------------------------------------------------------------------
+All packages are already referenced. Run "dotnet restore" to install.
+
+  Atheres.Atlas.Functions
+  -----------------------
+  Microsoft.Azure.Functions.Worker              1.22.0
+  Microsoft.Azure.Functions.Worker.Sdk          1.17.4
+  Microsoft.Azure.Functions.Worker.Extensions.Http           3.2.0
+  Microsoft.Azure.Functions.Worker.Extensions.Http.AspNetCore 1.3.2
+  Microsoft.Azure.Functions.Worker.Extensions.ServiceBus     5.3.0
+  Microsoft.Azure.Functions.Worker.Extensions.Timer          4.3.0
+  Microsoft.Azure.Functions.Worker.Extensions.SignalRService  1.13.0
+  Azure.Messaging.ServiceBus                    7.18.2
+  Microsoft.EntityFrameworkCore.SqlServer       8.0.11
+  SendGrid                                      9.29.3
+  Twilio                                        7.3.1
+  Microsoft.Extensions.Http                     8.0.1
+  Microsoft.ApplicationInsights.WorkerService   2.22.0
+  Microsoft.Azure.Functions.Worker.ApplicationInsights 1.2.0
+
+  Atheres.Atlas.Data
+  ------------------
+  Microsoft.EntityFrameworkCore                 8.0.11
+  Microsoft.EntityFrameworkCore.SqlServer       8.0.11
+  Microsoft.EntityFrameworkCore.Tools           8.0.11
+
+  Atheres.Atlas.TestBed
+  ---------------------
+  Azure.Messaging.ServiceBus                    7.18.2
+  Spectre.Console                               0.49.1
+  Microsoft.Extensions.Configuration.Json       8.0.1
+
+  Atheres.Atlas.FrontEnd (npm)
+  ----------------------------
+  @microsoft/signalr                            ^8.0.7
+  @react-google-maps/api                        ^2.19.3
+  axios                                         ^1.7.9
+  date-fns                                      ^4.1.0
+  react / react-dom                             ^18.3.1
+  react-router-dom                              ^6.28.0
+  tailwindcss                                   ^3.4.16
+  vite + @vitejs/plugin-react                   ^5.4.11 / ^4.3.4
+
+--------------------------------------------------------------------------------
+9. ENVIRONMENT VARIABLES — COMPLETE REFERENCE
+--------------------------------------------------------------------------------
+
+  Key                          Used By          Description
+  ---------------------------  ---------------  --------------------------------
+  SqlConnectionString          Functions        Azure SQL / LocalDB conn string
+  ServiceBusConnection         Functions        Azure Service Bus conn string
+  AzureSignalRConnectionString Functions        Azure SignalR conn string
+  GoogleMapsApiKey             Functions        Geocoding + Directions APIs
+  SendGridApiKey               Functions        Transactional email
+  SendGridFromEmail            Functions        Verified sender address
+  SendGridFromName             Functions        Display name on emails
+  TwilioAccountSid             Functions        Twilio account identifier
+  TwilioAuthToken              Functions        Twilio secret
+  TwilioFromNumber             Functions        E.164 format: +15551234567
+  FunctionHostUrl              Functions        Public URL for email links
+  VITE_GOOGLE_MAPS_KEY         FrontEnd (.env)  Map display in browser
+
+--------------------------------------------------------------------------------
+10. ESTIMATED MONTHLY COSTS (Azure, pay-as-you-go)
+--------------------------------------------------------------------------------
+
+  Service              Tier              Est. Cost/mo
+  -------------------  ----------------  -------------------
+  Azure Functions      Consumption       ~$0 (free 1M calls)
+  Azure Service Bus    Standard          ~$10
+  Azure SignalR        Free (F1)         $0 (dev/small prod)
+  Azure SQL Database   Basic (5 DTU)     ~$5
+  Azure Storage        LRS               ~$1
+  Application Insights Basic sampling    ~$0–5
+  Google Maps          API credits       $0 (under $200/mo)
+  SendGrid             Free tier         $0 (under 100/day)
+  Twilio               Pay-per-message   ~$0.0075/SMS
+
+  Approximate total for development/small production: ~$15–25/month
+
+================================================================================
